@@ -3,14 +3,14 @@ camera:
   fps_high: 15
   poll_interval_sec: 30
 detection:
-  pixel_threshold: 40
-  contour_min_area: 1500
-  brightness_change_threshold: 25
   backoff_intervals_sec:
   - 300
   - 900
   - 1800
   - 3600
+  brightness_change_threshold: 25
+  contour_min_area: 800
+  pixel_threshold: 25
   quiet_reset_sec: 1800
 logging:
   level: DEBUG
@@ -24,5 +24,4 @@ schedule:
   - 3
   - 4
 whatsapp:
-  # Phone number in international format. Quote it so YAML does not parse as integer.
   recipient: '+14088873660'
