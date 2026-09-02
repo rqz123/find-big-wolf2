@@ -1,0 +1,29 @@
+camera:
+  device_index: 0
+  fps_high: 15
+  poll_interval_sec: 30
+detection:
+  backoff_intervals_sec:
+  - 300
+  - 900
+  - 1800
+  - 3600
+  brightness_change_threshold: 25
+  contour_min_area: 800
+  pixel_threshold: 25
+  quiet_reset_sec: 1800
+logging:
+  level: DEBUG
+schedule:
+  end: '18:00'
+  start: 09:00
+  weekdays:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+telegram:
+  credentials_file: telegram_credentials.yaml
+  retries: 3
+  timeout_sec: 20

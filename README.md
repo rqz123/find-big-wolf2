@@ -11,7 +11,7 @@ SmartCam Watcher 是一个运行于 Windows 系统托盘的轻量级摄像头监
 - 自动发现 Windows 摄像头，并显示设备友好名称
 - 系统托盘控制：暂停/恢复、预览、切换摄像头、测试通知、打开日志
 - 按星期和时间段自动启停监控
-- Token 与本机配置不进入 Git
+- Telegram Token 与 Chat ID 独立存放，不进入 Git
 
 ## 系统要求
 
@@ -28,7 +28,6 @@ SmartCam Watcher 是一个运行于 Windows 系统托盘的轻量级摄像头监
 ```powershell
 py -3.12 -m venv venv
 .\venv\Scripts\python.exe -m pip install -r requirements.txt
-Copy-Item config.example.yaml config.yaml
 ```
 
 如果没有 `py` 命令，请先从 [python.org](https://www.python.org/downloads/windows/) 安装 64 位 Python，并在安装时包含 `pip` 和 `venv`。
@@ -64,7 +63,7 @@ Copy-Item config.example.yaml config.yaml
 
 ## 配置
 
-第一次克隆后可复制 `config.example.yaml`，或直接启动程序让它生成默认配置。
+仓库包含可公开的 `config.yaml`；当前摄像头索引为 `0`。在其他电脑上需要重新选择时，将 `camera.device_index` 改为 `-1`。`config.example.yaml` 是便于恢复默认值的模板。Telegram Token 和 Chat ID 不写入这两个文件。
 
 | 配置项 | 默认值 | 说明 |
 |---|---:|---|
@@ -83,7 +82,7 @@ Copy-Item config.example.yaml config.yaml
 | `telegram.retries` | `3` | 临时失败最大尝试次数 |
 | `logging.level` | `DEBUG` | Python 日志级别 |
 
-修改摄像头后，程序会把新的 `device_index` 保存到本地 `config.yaml`。时间、检测阈值和 Telegram 网络参数在下次启动时生效。
+修改摄像头后，程序会把新的 `device_index` 保存到 `config.yaml`，因此 Git 工作区可能显示该文件发生变化。时间、检测阈值和 Telegram 网络参数在下次启动时生效。
 
 ## 检测与告警流程
 
@@ -147,7 +146,7 @@ find-big-wolf2/
 ├── tests/                      Telegram 单元测试和端到端测试脚本
 ├── doc/                        设置指南与产品需求文档
 ├── config.example.yaml         可提交的配置模板
-├── config.yaml                 本机配置（Git 忽略）
+├── config.yaml                 当前公开配置（Git 跟踪）
 ├── telegram_credentials.yaml   私密凭据（Git 忽略）
 ├── requirements.txt
 ├── run.bat

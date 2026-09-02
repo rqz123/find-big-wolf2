@@ -105,7 +105,7 @@ main.py
 ## 5. 配置与数据
 
 - `config.example.yaml`：可提交的完整示例。
-- `config.yaml`：当前电脑的设置和摄像头索引，首次运行自动创建，Git 忽略。
+- `config.yaml`：当前公开设置和摄像头索引，由 Git 跟踪；不得包含 Token 或 Chat ID。
 - `telegram_credentials.yaml`：Bot Token 和 Chat ID，Git 忽略。
 - `logs/smartcam.log`：按午夜轮换，保留 7 份。
 - `logs/alert_*.jpg`：实际触发的告警图片，不进入 Git。
@@ -116,7 +116,7 @@ main.py
 
 - 任何代码、测试、日志不得输出完整 Bot Token。
 - Telegram API 网络异常只记录异常类型，避免 URL 中的 Token 进入日志。
-- 凭据文件和本机配置必须保持在 `.gitignore` 中。
+- Telegram 凭据文件必须保持在 `.gitignore` 中；公开配置不得包含任何凭据。
 - 自动发现 Chat ID 只能在唯一私人会话时执行。
 - Telegram Bot 私聊是云端聊天，不是端到端加密。
 - 告警图片同时存在于本机日志目录与 Telegram 云端，使用者负责访问控制和留存策略。

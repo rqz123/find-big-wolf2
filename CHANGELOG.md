@@ -15,7 +15,7 @@
 
 - 告警说明增加本地时区时间戳
 - 临时网络错误、限流和服务端错误最多重试 3 次
-- 本机 `config.yaml` 和 Telegram 凭据不再进入 Git
+- `config.yaml` 作为公开配置继续由 Git 跟踪；Telegram 凭据单独忽略
 - Python HTTP 依赖改为 `requests`
 
 ### Removed
