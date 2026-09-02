@@ -86,6 +86,11 @@ class TrayApp:
     def set_notifier(self, notifier: "TelegramNotifier") -> None:
         self._notifier = notifier
 
+    def set_monitoring_paused(self, paused: bool) -> None:
+        """Synchronize the tray menu after a remote Telegram command."""
+        self._monitoring_paused = paused
+        self._rebuild_menu()
+
     def update_camera_selection(
         self,
         camera_list: List[Tuple[int, str]],

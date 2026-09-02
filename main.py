@@ -14,7 +14,6 @@ from __future__ import annotations
 import os
 import sys
 import threading
-from datetime import datetime
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 if _ROOT not in sys.path:
@@ -25,7 +24,9 @@ from utils.logger import setup_logger, get_logger
 from core.camera import enumerate_cameras
 from core.detector import MotionDetector
 from core.scheduler import Scheduler
+from core.telegram_controller import TelegramCameraController
 from notify.telegram import TelegramNotifier
+from notify.telegram_commands import TelegramCommandListener
 from ui.preview import PreviewWindow
 from ui.tray import TrayApp
 
@@ -100,18 +101,11 @@ def main() -> None:
         current_device_index=current_dev_idx,
     )
 
-    _ALERT_CAPTIONS = {
-        "lighting": "Lighting change detected by SmartCam Watcher",
-        "movement": "Motion detected by SmartCam Watcher",
-    }
-
     def on_alert(image_path: str, event_type: str = "movement") -> None:
-        message = _ALERT_CAPTIONS.get(event_type, "Alert from SmartCam Watcher")
-        caption = f"{message}\n{datetime.now().astimezone():%Y-%m-%d %H:%M:%S %Z}"
         log.warning(f"Alert triggered [{event_type}]: {image_path}")
         threading.Thread(
-            target=notifier.send_alert,
-            args=(image_path, caption),
+            target=controller.send_motion_alert,
+            args=(image_path, event_type),
             daemon=True,
         ).start()
 
@@ -136,6 +130,17 @@ def main() -> None:
     detector.set_camera_switched_callback(on_camera_switched)
 
     scheduler = Scheduler(cfg=cfg, detector=detector)
+    controller = TelegramCameraController(
+        cfg=cfg,
+        detector=detector,
+        notifier=notifier,
+        on_pause_change=tray.set_monitoring_paused,
+    )
+    command_listener = TelegramCommandListener(
+        notifier=notifier,
+        on_command=controller.handle,
+        poll_timeout_sec=cfg.get("telegram", {}).get("command_poll_timeout_sec", 20),
+    )
 
     tray.set_detector(detector)
     tray.set_notifier(notifier)
@@ -143,7 +148,8 @@ def main() -> None:
     # ── Start background threads ──────────────────────────────────────
     detector.start()
     scheduler.start()
-    log.info("Detector and Scheduler started")
+    command_listener.start()
+    log.info("Detector, Scheduler, and Telegram commands started")
 
     # ── Main thread: tray (blocks until user quits) ───────────────────
     try:
@@ -152,6 +158,7 @@ def main() -> None:
         log.info("KeyboardInterrupt received")
     finally:
         log.info("Shutting down ...")
+        command_listener.stop()
         preview.stop()
         scheduler.stop()
         detector.stop()

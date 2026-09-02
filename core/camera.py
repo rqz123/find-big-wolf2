@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import threading
 from typing import Callable, List, Optional, Tuple
 
 import cv2
@@ -110,41 +111,46 @@ class CameraCapture:
         self._cap: Optional[cv2.VideoCapture] = None
         self._consecutive_failures = 0
         self._MAX_FAILURES = 5
+        self._lock = threading.RLock()
 
     def open(self) -> bool:
-        log.info(f"Opening camera index={self.device_index}")
-        self._cap = cv2.VideoCapture(self.device_index, cv2.CAP_DSHOW)
-        if not self._cap.isOpened():
-            log.error(f"Cannot open camera index={self.device_index}")
-            self._notify_error()
-            return False
-        self._consecutive_failures = 0
-        log.info("Camera opened successfully")
-        return True
+        with self._lock:
+            log.info(f"Opening camera index={self.device_index}")
+            self._cap = cv2.VideoCapture(self.device_index, cv2.CAP_DSHOW)
+            if not self._cap.isOpened():
+                log.error(f"Cannot open camera index={self.device_index}")
+                self._notify_error()
+                return False
+            self._consecutive_failures = 0
+            log.info("Camera opened successfully")
+            return True
 
     def read_frame(self) -> Optional[np.ndarray]:
-        if self._cap is None or not self._cap.isOpened():
-            log.warning("Camera not open, cannot read frame")
-            return None
-        ret, frame = self._cap.read()
-        if not ret or frame is None:
-            self._consecutive_failures += 1
-            log.warning(f"Frame read failed (consecutive={self._consecutive_failures})")
-            if self._consecutive_failures >= self._MAX_FAILURES:
-                self._notify_error()
-            return None
-        self._consecutive_failures = 0
-        return frame
+        with self._lock:
+            if self._cap is None or not self._cap.isOpened():
+                log.warning("Camera not open, cannot read frame")
+                return None
+            ret, frame = self._cap.read()
+            if not ret or frame is None:
+                self._consecutive_failures += 1
+                log.warning(f"Frame read failed (consecutive={self._consecutive_failures})")
+                if self._consecutive_failures >= self._MAX_FAILURES:
+                    self._notify_error()
+                return None
+            self._consecutive_failures = 0
+            return frame
 
     def close(self) -> None:
-        if self._cap is not None:
-            self._cap.release()
-            self._cap = None
-            log.info("Camera closed")
+        with self._lock:
+            if self._cap is not None:
+                self._cap.release()
+                self._cap = None
+                log.info("Camera closed")
 
     @property
     def is_open(self) -> bool:
-        return self._cap is not None and self._cap.isOpened()
+        with self._lock:
+            return self._cap is not None and self._cap.isOpened()
 
     def _notify_error(self) -> None:
         log.error("Camera error threshold reached, triggering on_error callback")

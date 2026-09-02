@@ -59,6 +59,35 @@ class TelegramNotifierTests(unittest.TestCase):
         self.assertIn("photo", request.kwargs["files"])
 
     @patch("notify.telegram.requests.post")
+    def test_sends_animation(self, post: Mock) -> None:
+        self._write_credentials("123:secret", "456")
+        animation_path = self.image_path.with_suffix(".gif")
+        animation_path.write_bytes(b"GIF89a")
+        post.return_value = self._response({"ok": True, "result": {}})
+
+        notifier = TelegramNotifier(self.cfg)
+        self.assertTrue(notifier.send_animation(str(animation_path), "camera clip"))
+
+        request = post.call_args
+        self.assertTrue(request.args[0].endswith("/sendAnimation"))
+        self.assertIn("animation", request.kwargs["files"])
+
+    @patch("notify.telegram.requests.get")
+    def test_get_updates_uses_offset_and_long_poll(self, get: Mock) -> None:
+        self._write_credentials("123:secret", "456")
+        get.return_value = self._response(
+            {"ok": True, "result": [{"update_id": 42}]}
+        )
+
+        notifier = TelegramNotifier(self.cfg)
+        updates = notifier.get_updates(offset=40, timeout_sec=12)
+
+        self.assertEqual(updates, [{"update_id": 42}])
+        request = get.call_args
+        self.assertEqual(request.kwargs["params"]["offset"], 40)
+        self.assertEqual(request.kwargs["params"]["timeout"], 12)
+
+    @patch("notify.telegram.requests.post")
     @patch("notify.telegram.requests.get")
     def test_discovers_single_private_chat(self, get: Mock, post: Mock) -> None:
         self._write_credentials("123:secret")

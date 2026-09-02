@@ -97,6 +97,7 @@ class MotionDetector:
 
         self._on_camera_switched: Optional[Callable] = None
         self._switch_lock = threading.Lock()
+        self._command_capture_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Public control
@@ -149,13 +150,54 @@ class MotionDetector:
             self._on_status_change("suspended")
             log.info("Detector paused by user")
 
-    def user_resume(self) -> None:
+    def user_resume(self, active: bool = True) -> None:
         self._user_paused = False
-        if self._suspended:
+        if active and self._suspended:
             self._suspended = False
             self._on_status_change("active")
             self._suspend_event.set()
             log.info("Detector resumed by user")
+        elif not active:
+            self.suspend()
+
+    @property
+    def is_user_paused(self) -> bool:
+        return self._user_paused
+
+    @property
+    def is_suspended(self) -> bool:
+        return self._suspended
+
+    @property
+    def current_device_index(self) -> int:
+        return self._camera.device_index
+
+    def capture_frame(self) -> Optional[np.ndarray]:
+        """Read one frame for an on-demand Telegram command."""
+        with self._command_capture_lock:
+            frame = self._camera.read_frame()
+            return frame.copy() if frame is not None else None
+
+    def capture_frames(self, frame_count: int, fps: float) -> List[np.ndarray]:
+        """Capture a short, low-frame-rate sequence without changing monitor mode."""
+        count = max(1, int(frame_count))
+        interval = 1.0 / max(0.2, float(fps))
+        frames: List[np.ndarray] = []
+
+        with self._command_capture_lock:
+            next_frame_at = time.monotonic()
+            for index in range(count):
+                frame = self._camera.read_frame()
+                if frame is not None:
+                    frames.append(frame.copy())
+                if index == count - 1:
+                    break
+                next_frame_at += interval
+                remaining = next_frame_at - time.monotonic()
+                if remaining > 0:
+                    time.sleep(remaining)
+
+        return frames
 
     def set_preview_callback(
         self, cb: Optional[Callable[[np.ndarray], None]]

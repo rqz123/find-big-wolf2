@@ -1,6 +1,6 @@
 # SmartCam Watcher 产品需求与工程说明
 
-版本：v1.1
+版本：v1.2
 
 平台：Windows 10/11 64 位
 
@@ -8,12 +8,13 @@
 
 ## 1. 产品目标
 
-SmartCam Watcher 在指定时间段内监测 Windows 摄像头画面，识别光线变化和人员/物体移动，将带时间戳的抓拍图片快速推送到用户的 Telegram 手机 App。产品以系统托盘方式运行，优先满足低干扰、易配置和告警可追溯。
+SmartCam Watcher 在指定时间段内监测 Windows 摄像头画面，识别光线变化和人员/物体移动，将带时间戳的低帧率动态画面推送到用户的 Telegram 手机 App。用户也可以从 Bot 安全地请求照片或连续画面，并切换自动检测与暂停状态。产品以系统托盘方式运行，优先满足低干扰、易配置、远程可控和告警可追溯。
 
 ## 2. 使用场景
 
 - 工作时间监测办公室、房间或门口的明显活动
-- 在手机上及时收到事件类型和现场图片
+- 在手机上及时收到事件类型和几秒现场连续画面
+- 从手机 Bot 随时取图或暂停/恢复自动检测
 - 从本机日志与抓拍文件排查漏报、误报和发送失败
 - 临时暂停监控、调试预览或切换摄像头
 
@@ -45,15 +46,30 @@ SmartCam Watcher 在指定时间段内监测 Windows 摄像头画面，识别光
 
 ### 3.4 Telegram 通知
 
-- 使用 Telegram 官方 Bot API `sendPhoto` 上传本机 JPEG/PNG。
-- 图片说明包含事件类型、本地日期、时间和时区。
+- 自动告警默认采集 5 秒、2 FPS 连续 JPEG 帧，生成 GIF 后使用 `sendAnimation` 上传。
+- Telegram 手机端直接显示自动播放的动态画面；若动画生成或发送失败，使用 `sendPhoto` 回退到告警 JPEG。
+- 媒体说明包含事件类型、本地日期、时间和时区。
 - Bot Token 与 Chat ID 从被 Git 忽略的凭据文件读取；同名环境变量可以覆盖文件值。
 - 用户向 Bot 发送 `/start` 后，程序可以自动发现唯一的私人 Chat ID。
 - 如果检测到多个私人会话，必须手动指定 Chat ID，禁止猜测接收人。
+- 使用 `getUpdates` 长轮询接收命令，并通过递增 `offset` 确认已处理更新。
+- 程序启动前积压的命令必须丢弃，避免重启后执行过期的暂停或取图操作。
+- 仅执行来自配置 Chat ID 且类型为私人聊天的命令，其他来源静默忽略。
+- 使用 `setMyCommands` 注册 Telegram 手机端命令菜单。
 - 网络连接失败、超时、HTTP 429 或 5xx 错误最多尝试配置的次数。
 - 其他 4xx 配置/鉴权错误不重试，并写入日志。
 
-### 3.5 时间调度与手动控制
+### 3.5 Telegram 命令
+
+- `/photo`：立即读取一帧并发送 JPEG。
+- `/clip`：按配置的时长、帧率和最大宽度生成并发送动态画面。
+- `/pause`：暂停自动变化检测，但保持摄像头可供 `/photo` 和 `/clip` 使用。
+- `/auto`：清除手动暂停，并按当前 `schedule` 判断立即监控或待机。
+- `/status`：返回自动/暂停状态、摄像头索引和本地时间。
+- `/help` 与 `/start`：返回命令帮助；普通文本也返回帮助。
+- 命令顺序执行，避免并发取图争抢摄像头。
+
+### 3.6 时间调度与手动控制
 
 - 调度器每 30 秒按本地时间检查 `schedule` 配置。
 - 默认在周一至周五 09:00（含）到 18:00（不含）运行检测。
@@ -61,7 +77,7 @@ SmartCam Watcher 在指定时间段内监测 Windows 摄像头画面，识别光
 - 用户可从托盘手动暂停，调度器不得自动覆盖手动暂停状态。
 - 用户手动恢复后重新进入活动状态。
 
-### 3.6 系统托盘与预览
+### 3.7 系统托盘与预览
 
 - 绿色图标表示活动，蓝色表示挂起，红色表示摄像头错误。
 - 菜单提供暂停/恢复、打开预览、选择摄像头、Telegram 设置、测试通知、打开日志和退出。
@@ -74,9 +90,12 @@ SmartCam Watcher 在指定时间段内监测 Windows 摄像头画面，识别光
 ```text
 main.py
   ├─ Config / Logger
-  ├─ CameraCapture ──> MotionDetector ──> JPEG snapshot
-  │                         │
-  │                         └──────────> TelegramNotifier ──> Telegram App
+  ├─ CameraCapture ──> MotionDetector ──> JPEG + GIF animation
+  │          ▲              │                      │
+  │          │              └──────────────────────┤
+  │          └─ TelegramCameraController <─ commands
+  │                                                ▼
+  │                                      TelegramNotifier ──> Telegram App
   ├─ Scheduler ─────────────> MotionDetector suspend/resume
   └─ TrayApp <──────────────> Preview / Camera switch / Test alert
 ```
@@ -86,10 +105,12 @@ main.py
 | 模块 | 职责 |
 |---|---|
 | `main.py` | 初始化模块、连接回调、控制生命周期 |
-| `core/camera.py` | Windows PnP 名称查询、摄像头探测和 DirectShow 采集 |
-| `core/detector.py` | 双模式检测、事件分类、告警退避和抓拍 |
+| `core/camera.py` | Windows PnP 名称查询、摄像头探测和线程安全的 DirectShow 采集 |
+| `core/detector.py` | 双模式检测、事件分类、告警退避、抓拍和命令帧序列采集 |
 | `core/scheduler.py` | 本地工作时间判断及挂起/恢复 |
-| `notify/telegram.py` | 凭据读取、Chat ID 发现、图片上传和网络重试 |
+| `core/telegram_controller.py` | 命令动作、GIF 生成、状态响应和自动告警媒体 |
+| `notify/telegram.py` | 凭据、Chat ID、消息/媒体 API、更新读取和网络重试 |
+| `notify/telegram_commands.py` | 长轮询、命令解析、来源授权和命令菜单 |
 | `ui/tray.py` | 托盘状态、菜单操作和测试图片 |
 | `ui/preview.py` | 调试画面、叠加信息和键盘切换摄像头 |
 | `utils/config_loader.py` | YAML 默认值、读取和保存 |
@@ -100,6 +121,8 @@ main.py
 - 主线程运行 `pystray` 事件循环。
 - 检测器和调度器分别使用守护线程。
 - 每次 Telegram 告警在独立守护线程执行，避免阻塞图像检测。
+- Telegram 命令监听使用一个守护线程；命令在该线程中顺序执行。
+- 摄像头底层读取使用可重入互斥锁，检测、预览和命令不会同时调用 `VideoCapture`。
 - 调试预览使用独立线程；摄像头切换另起短生命周期线程。
 
 ## 5. 配置与数据
@@ -118,6 +141,8 @@ main.py
 - Telegram API 网络异常只记录异常类型，避免 URL 中的 Token 进入日志。
 - Telegram 凭据文件必须保持在 `.gitignore` 中；公开配置不得包含任何凭据。
 - 自动发现 Chat ID 只能在唯一私人会话时执行。
+- 所有入站命令必须同时满足私人聊天类型和 Chat ID 完全匹配。
+- 未授权聊天不接收响应，避免泄露 Bot 是否连接到摄像头。
 - Telegram Bot 私聊是云端聊天，不是端到端加密。
 - 告警图片同时存在于本机日志目录与 Telegram 云端，使用者负责访问控制和留存策略。
 
@@ -125,6 +150,8 @@ main.py
 
 - Telegram 临时错误按 1、2、4 秒等间隔退避，服务端 `retry_after` 优先且最多等待 30 秒。
 - 单次发送最终失败时保留本机抓拍，并记录错误；当前不会自动补发历史告警。
+- 动态画面生成失败时，自动告警回退为事件 JPEG；命令取图失败会返回明确文字状态。
+- 同一个 Bot 若被多个进程同时长轮询，Telegram 会返回冲突；部署时只运行一个命令接收实例。
 - 摄像头连续读取失败达到阈值后进入红色错误状态。
 - 当前版本不会自动重新打开持续失败的摄像头，需要释放占用并重启。
 - 调试预览回调异常不得终止检测线程。
@@ -134,7 +161,9 @@ main.py
 - 在 Windows 10/11 上枚举至少一台可用摄像头。
 - 工作时间内检测线程和调度线程正常启动。
 - 光线或轮廓变化满足阈值后在 `logs/` 生成 JPEG。
-- Telegram 测试通知能在手机收到文字与图片。
+- Telegram 测试通知能在手机收到文字与图片，自动告警能收到动态画面或 JPEG 回退。
+- 已授权手机可执行 `/photo`、`/clip`、`/pause`、`/auto` 和 `/status`。
+- 未授权 Chat ID 的命令不会触发摄像头动作或收到响应。
 - 缺少 Token、错误 Token、无 `/start`、多个私人聊天和临时网络失败都有明确日志。
 - 托盘可暂停/恢复、切换摄像头、打开/关闭预览并安全退出。
 - `python -m unittest discover -s tests -v` 全部通过。
@@ -144,6 +173,8 @@ main.py
 - 仅在 Windows DirectShow 环境验证。
 - 不是连续录像、人员识别或专业入侵检测系统。
 - 告警发送采用内存线程，没有持久化待发送队列。
+- 动态画面是低帧率 GIF/Telegram 动画，不是实时视频流，也不包含声音。
+- Bot 命令采用 `getUpdates`，同一个 Bot 不支持多个 SmartCam 实例并行接收命令。
 - 尚未提供正式安装包、Windows 服务和自动升级。
 - 检测效果依赖镜头、光线和阈值，需要按现场调优。
 

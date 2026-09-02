@@ -28,6 +28,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "credentials_file": "telegram_credentials.yaml",
         "timeout_sec": 20,
         "retries": 3,
+        "command_poll_timeout_sec": 20,
+        "clip_duration_sec": 5,
+        "clip_fps": 2,
+        "clip_max_width": 640,
     },
     "logging": {
         "level": "DEBUG",

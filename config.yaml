@@ -24,6 +24,10 @@ schedule:
   - 3
   - 4
 telegram:
+  clip_duration_sec: 5
+  clip_fps: 2
+  clip_max_width: 640
+  command_poll_timeout_sec: 20
   credentials_file: telegram_credentials.yaml
   retries: 3
   timeout_sec: 20

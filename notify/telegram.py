@@ -13,7 +13,7 @@ import mimetypes
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import yaml
@@ -70,44 +70,165 @@ class TelegramNotifier:
 
     def send_alert(self, image_path: str, caption: str = "Motion detected!") -> bool:
         """Send one image alert, retrying temporary network/server failures."""
+        return self._send_media(
+            method="sendPhoto",
+            field_name="photo",
+            media_path=image_path,
+            caption=caption,
+            media_label="alert",
+        )
+
+    def send_animation(self, animation_path: str, caption: str = "Camera clip") -> bool:
+        """Send a GIF or silent MPEG-4 animation."""
+        return self._send_media(
+            method="sendAnimation",
+            field_name="animation",
+            media_path=animation_path,
+            caption=caption,
+            media_label="animation",
+        )
+
+    def send_message(self, text: str) -> bool:
+        """Send a text response to the configured private chat."""
         token, chat_id = self._load_credentials()
         if token not in _PLACEHOLDERS and chat_id in _PLACEHOLDERS:
             chat_id = self._discover_chat_id(token)
 
         if token in _PLACEHOLDERS or chat_id in _PLACEHOLDERS:
             log.error(
-                "Telegram alert not sent: add bot_token to %s, send /start to the "
+                "Telegram message not sent: add bot_token to %s, send /start to the "
                 "bot, and try again",
                 self._credentials_path,
             )
             return False
 
-        path = Path(image_path).resolve()
-        if not path.is_file():
-            log.error("Telegram alert image does not exist: %s", path)
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        return self._post_form(
+            url,
+            {"chat_id": chat_id, "text": text[:4096]},
+            "message",
+        )
+
+    @property
+    def authorized_chat_id(self) -> str:
+        """Return the only chat allowed to control the camera."""
+        _, chat_id = self._load_credentials()
+        return "" if chat_id in _PLACEHOLDERS else chat_id
+
+    def get_updates(
+        self,
+        offset: Optional[int] = None,
+        timeout_sec: int = 0,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Read Bot API updates. None means unavailable/error; [] means no updates."""
+        token, chat_id = self._load_credentials()
+        if token in _PLACEHOLDERS or chat_id in _PLACEHOLDERS:
+            return None
+
+        poll_timeout = max(0, min(50, int(timeout_sec)))
+        params: Dict[str, Any] = {
+            "timeout": poll_timeout,
+            "limit": 100,
+            "allowed_updates": '["message"]',
+        }
+        if offset is not None:
+            params["offset"] = int(offset)
+
+        url = f"https://api.telegram.org/bot{token}/getUpdates"
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                timeout=(5, max(self._timeout_sec, poll_timeout + 5)),
+            )
+            payload = self._response_payload(response)
+            if response.ok and payload.get("ok") is True:
+                updates = payload.get("result", [])
+                return updates if isinstance(updates, list) else []
+            log.error(
+                "Telegram getUpdates failed (HTTP %s): %s",
+                response.status_code,
+                payload.get("description", response.reason),
+            )
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            log.warning("Telegram command poll failed (%s)", type(exc).__name__)
+        except requests.RequestException as exc:
+            log.error("Telegram command poll failed (%s)", type(exc).__name__)
+        return None
+
+    def set_commands(self, commands: List[Dict[str, str]]) -> bool:
+        """Publish the command menu shown by Telegram clients."""
+        token, chat_id = self._load_credentials()
+        if token in _PLACEHOLDERS or chat_id in _PLACEHOLDERS:
             return False
 
-        url = f"https://api.telegram.org/bot{token}/sendPhoto"
-        mime_type = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+        url = f"https://api.telegram.org/bot{token}/setMyCommands"
+        try:
+            response = requests.post(
+                url,
+                json={"commands": commands},
+                timeout=(5, self._timeout_sec),
+            )
+            payload = self._response_payload(response)
+            if response.ok and payload.get("ok") is True:
+                log.info("Telegram command menu registered")
+                return True
+            log.error(
+                "Cannot register Telegram command menu (HTTP %s): %s",
+                response.status_code,
+                payload.get("description", response.reason),
+            )
+        except requests.RequestException as exc:
+            log.warning("Cannot register Telegram commands (%s)", type(exc).__name__)
+        return False
+
+    def _send_media(
+        self,
+        method: str,
+        field_name: str,
+        media_path: str,
+        caption: str,
+        media_label: str,
+    ) -> bool:
+        token, chat_id = self._load_credentials()
+        if token not in _PLACEHOLDERS and chat_id in _PLACEHOLDERS:
+            chat_id = self._discover_chat_id(token)
+
+        if token in _PLACEHOLDERS or chat_id in _PLACEHOLDERS:
+            log.error(
+                "Telegram media not sent: add bot_token to %s, send /start to the "
+                "bot, and try again",
+                self._credentials_path,
+            )
+            return False
+
+        path = Path(media_path).resolve()
+        if not path.is_file():
+            log.error("Telegram media file does not exist: %s", path)
+            return False
+
+        url = f"https://api.telegram.org/bot{token}/{method}"
+        mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
 
         for attempt in range(1, self._retries + 1):
             try:
-                with path.open("rb") as image_file:
+                with path.open("rb") as media_file:
                     response = requests.post(
                         url,
                         data={"chat_id": chat_id, "caption": caption[:1024]},
-                        files={"photo": (path.name, image_file, mime_type)},
+                        files={field_name: (path.name, media_file, mime_type)},
                         timeout=(5, self._timeout_sec),
                     )
 
                 payload = self._response_payload(response)
                 if response.ok and payload.get("ok") is True:
-                    log.info("Telegram alert sent successfully")
+                    log.info("Telegram %s sent successfully", media_label)
                     return True
 
                 description = payload.get("description", response.reason)
                 log.error(
-                    "Telegram API rejected alert (HTTP %s): %s",
+                    "Telegram API rejected %s (HTTP %s): %s",
+                    media_label,
                     response.status_code,
                     description,
                 )
@@ -124,7 +245,8 @@ class TelegramNotifier:
                 delay = self._retry_delay(attempt, retry_after)
             except (requests.Timeout, requests.ConnectionError) as exc:
                 log.warning(
-                    "Telegram send attempt %s/%s failed (%s)",
+                    "Telegram %s attempt %s/%s failed (%s)",
+                    media_label,
                     attempt,
                     self._retries,
                     type(exc).__name__,
@@ -134,13 +256,57 @@ class TelegramNotifier:
                 log.error("Telegram request failed (%s)", type(exc).__name__)
                 return False
             except OSError as exc:
-                log.error("Cannot read Telegram alert image %s: %s", path, exc)
+                log.error("Cannot read Telegram media %s: %s", path, exc)
                 return False
 
             if attempt < self._retries:
                 time.sleep(delay)
 
-        log.error("Telegram alert failed after %s attempts", self._retries)
+        log.error("Telegram %s failed after %s attempts", media_label, self._retries)
+        return False
+
+    def _post_form(self, url: str, data: Dict[str, Any], label: str) -> bool:
+        for attempt in range(1, self._retries + 1):
+            try:
+                response = requests.post(
+                    url,
+                    data=data,
+                    timeout=(5, self._timeout_sec),
+                )
+                payload = self._response_payload(response)
+                if response.ok and payload.get("ok") is True:
+                    return True
+                log.error(
+                    "Telegram API rejected %s (HTTP %s): %s",
+                    label,
+                    response.status_code,
+                    payload.get("description", response.reason),
+                )
+                if response.status_code < 500 and response.status_code != 429:
+                    return False
+                parameters = payload.get("parameters", {})
+                retry_after = (
+                    parameters.get("retry_after")
+                    if isinstance(parameters, dict)
+                    else None
+                )
+                delay = self._retry_delay(attempt, retry_after)
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                log.warning(
+                    "Telegram %s attempt %s/%s failed (%s)",
+                    label,
+                    attempt,
+                    self._retries,
+                    type(exc).__name__,
+                )
+                delay = self._retry_delay(attempt)
+            except requests.RequestException as exc:
+                log.error("Telegram request failed (%s)", type(exc).__name__)
+                return False
+
+            if attempt < self._retries:
+                time.sleep(delay)
+
         return False
 
     def _discover_chat_id(self, token: str) -> str:
