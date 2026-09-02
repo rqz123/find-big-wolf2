@@ -18,14 +18,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "poll_interval_sec": 30,
     },
     "detection": {
-        "pixel_threshold": 40,
-        "contour_min_area": 1500,
+        "pixel_threshold": 25,
+        "contour_min_area": 800,
         "brightness_change_threshold": 25,
         "backoff_intervals_sec": [300, 900, 1800, 3600],
         "quiet_reset_sec": 1800,
     },
-    "whatsapp": {
-        "recipient": "REPLACE_ME",   # international format without '+', e.g. 8613012345678
+    "telegram": {
+        "credentials_file": "telegram_credentials.yaml",
+        "timeout_sec": 20,
+        "retries": 3,
     },
     "logging": {
         "level": "DEBUG",

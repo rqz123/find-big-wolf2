@@ -79,6 +79,7 @@ class MotionDetector:
 
         self._mode: str = "A"
         self._suspended: bool = False
+        self._user_paused: bool = False
         self._running: bool = False
         self._thread: Optional[threading.Thread] = None
         self._prev_gray: Optional[np.ndarray] = None
@@ -131,11 +132,30 @@ class MotionDetector:
             log.info("Detector suspended (outside work hours)")
 
     def resume(self) -> None:
+        if self._user_paused:
+            log.debug("Scheduler resume ignored — user has manually paused")
+            return
         if self._suspended:
             self._suspended = False
             self._on_status_change("active")
             self._suspend_event.set()
             log.info("Detector resumed (work hours)")
+
+    def user_pause(self) -> None:
+        self._user_paused = True
+        if not self._suspended:
+            self._suspended = True
+            self._mode = "A"
+            self._on_status_change("suspended")
+            log.info("Detector paused by user")
+
+    def user_resume(self) -> None:
+        self._user_paused = False
+        if self._suspended:
+            self._suspended = False
+            self._on_status_change("active")
+            self._suspend_event.set()
+            log.info("Detector resumed by user")
 
     def set_preview_callback(
         self, cb: Optional[Callable[[np.ndarray], None]]
@@ -285,18 +305,18 @@ class MotionDetector:
 
     def _trigger_alert(self, frame: np.ndarray, event_type: str) -> None:
         now = time.time()
-        current_debounce = self._backoff_intervals[self._backoff_index]
         elapsed = now - self._last_alert_time
-
-        if elapsed < current_debounce:
-            remaining = current_debounce - elapsed
-            log.debug(f"Alert debounced — next in {remaining:.0f}s (interval={current_debounce}s)")
-            return
 
         # Quiet reset: long gap since last alert means a new activity session
         if self._backoff_index > 0 and elapsed > self._quiet_reset_sec:
             log.info(f"Backoff reset — {elapsed:.0f}s since last alert (quiet period)")
             self._backoff_index = 0
+
+        current_debounce = self._backoff_intervals[self._backoff_index]
+        if elapsed < current_debounce:
+            remaining = current_debounce - elapsed
+            log.debug(f"Alert debounced — next in {remaining:.0f}s (interval={current_debounce}s)")
+            return
 
         self._last_alert_time = now
         next_idx = min(self._backoff_index + 1, len(self._backoff_intervals) - 1)

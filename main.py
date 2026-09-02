@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+from datetime import datetime
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 if _ROOT not in sys.path:
@@ -24,7 +25,7 @@ from utils.logger import setup_logger, get_logger
 from core.camera import enumerate_cameras
 from core.detector import MotionDetector
 from core.scheduler import Scheduler
-from notify.whatsapp import WhatsAppNotifier
+from notify.telegram import TelegramNotifier
 from ui.preview import PreviewWindow
 from ui.tray import TrayApp
 
@@ -89,7 +90,7 @@ def main() -> None:
         sys.exit(1)
 
     # ── Init modules ─────────────────────────────────────────────────
-    notifier = WhatsAppNotifier(cfg)
+    notifier = TelegramNotifier(cfg)
     preview = PreviewWindow()
 
     tray = TrayApp(
@@ -105,7 +106,8 @@ def main() -> None:
     }
 
     def on_alert(image_path: str, event_type: str = "movement") -> None:
-        caption = _ALERT_CAPTIONS.get(event_type, "Alert from SmartCam Watcher")
+        message = _ALERT_CAPTIONS.get(event_type, "Alert from SmartCam Watcher")
+        caption = f"{message}\n{datetime.now().astimezone():%Y-%m-%d %H:%M:%S %Z}"
         log.warning(f"Alert triggered [{event_type}]: {image_path}")
         threading.Thread(
             target=notifier.send_alert,

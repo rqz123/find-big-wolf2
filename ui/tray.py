@@ -9,7 +9,8 @@ Menu layout:
     * DTEN ME Pro Camera Array
       Integrated Webcam
   ──────────────────────────────────────────
-  WhatsApp Setup (scan QR to link device)
+  Telegram Setup
+  Send Telegram Test Alert
   ──────────────────────────────────────────
   Open Logs
   Quit
@@ -33,7 +34,7 @@ from pystray import MenuItem as Item, Menu
 if TYPE_CHECKING:
     from ui.preview import PreviewWindow
     from core.detector import MotionDetector
-    from notify.whatsapp import WhatsAppNotifier
+    from notify.telegram import TelegramNotifier
 
 log = logging.getLogger("smartcam.tray")
 
@@ -73,15 +74,16 @@ class TrayApp:
         self._status: str = "active"
         self._icon: Optional[pystray.Icon] = None
         self._detector: Optional["MotionDetector"] = None
-        self._notifier: Optional["WhatsAppNotifier"] = None
+        self._notifier: Optional["TelegramNotifier"] = None
         self._preview_open: bool = False
+        self._monitoring_paused: bool = False
         self._camera_list: List[Tuple[int, str]] = camera_list
         self._current_device_index: int = current_device_index
 
     def set_detector(self, detector: "MotionDetector") -> None:
         self._detector = detector
 
-    def set_notifier(self, notifier: "WhatsAppNotifier") -> None:
+    def set_notifier(self, notifier: "TelegramNotifier") -> None:
         self._notifier = notifier
 
     def update_camera_selection(
@@ -148,14 +150,17 @@ class TrayApp:
             else Menu(Item("(no cameras available)", None, enabled=False)),
         )
 
+        pause_label = "Resume Monitoring" if self._monitoring_paused else "Pause Monitoring"
+
         return Menu(
             Item(_STATUS_LABELS.get(self._status, "Status: Unknown"), None, enabled=False),
             Menu.SEPARATOR,
+            Item(pause_label, self._toggle_monitoring),
             Item("[Debug] " + preview_label, self._toggle_preview),
             camera_submenu,
             Menu.SEPARATOR,
-            Item("WhatsApp Setup (scan QR to link device)", self._whatsapp_setup),
-            Item("Send Test Alert", self._send_test_alert),
+            Item("Telegram Setup", self._telegram_setup),
+            Item("Send Telegram Test Alert", self._send_test_alert),
             Menu.SEPARATOR,
             Item("Open Logs", self._open_logs),
             Item("Quit", self._quit),
@@ -172,6 +177,19 @@ class TrayApp:
     # ------------------------------------------------------------------
     # Callbacks
     # ------------------------------------------------------------------
+
+    def _toggle_monitoring(self, icon, item) -> None:
+        if self._monitoring_paused:
+            self._monitoring_paused = False
+            if self._detector:
+                self._detector.user_resume()
+            log.info("Monitoring resumed by user")
+        else:
+            self._monitoring_paused = True
+            if self._detector:
+                self._detector.user_pause()
+            log.info("Monitoring paused by user")
+        self._rebuild_menu()
 
     def _toggle_preview(self, icon, item) -> None:
         if self._preview_open:
@@ -209,14 +227,22 @@ class TrayApp:
             self._preview.notify_camera_changed(self._camera_list, device_index)
         self._rebuild_menu()
 
-    def _whatsapp_setup(self, icon, item) -> None:
+    def _telegram_setup(self, icon, item) -> None:
         def _run():
             if self._notifier:
-                self._notifier.setup()
-        threading.Thread(target=_run, name="wa-setup", daemon=True).start()
+                credentials_path = self._notifier.ensure_credentials_file()
+                guide_path = os.path.abspath(
+                    os.path.join(os.path.dirname(__file__), "..", "doc", "Telegram_Setup.md")
+                )
+                try:
+                    os.startfile(guide_path)
+                    os.startfile(credentials_path)
+                except Exception as exc:
+                    log.warning(f"Cannot open Telegram setup files: {exc}")
+        threading.Thread(target=_run, name="telegram-setup", daemon=True).start()
 
     def _send_test_alert(self, icon, item) -> None:
-        """Send a test WhatsApp message with a generated placeholder image."""
+        """Send a test Telegram message with a generated placeholder image."""
         import os, tempfile
         import numpy as np
         import cv2
@@ -242,7 +268,7 @@ class TrayApp:
                 except OSError:
                     pass
 
-        threading.Thread(target=_run, name="wa-test", daemon=True).start()
+        threading.Thread(target=_run, name="telegram-test", daemon=True).start()
 
     def _open_logs(self, icon, item) -> None:
         try:
