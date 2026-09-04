@@ -116,9 +116,13 @@ class CameraCapture:
     def open(self) -> bool:
         with self._lock:
             log.info(f"Opening camera index={self.device_index}")
+            if self._cap is not None:
+                self._cap.release()
             self._cap = cv2.VideoCapture(self.device_index, cv2.CAP_DSHOW)
             if not self._cap.isOpened():
                 log.error(f"Cannot open camera index={self.device_index}")
+                self._cap.release()
+                self._cap = None
                 self._notify_error()
                 return False
             self._consecutive_failures = 0
@@ -139,6 +143,15 @@ class CameraCapture:
                 return None
             self._consecutive_failures = 0
             return frame
+
+    def reopen(self) -> bool:
+        """Atomically recreate the capture handle after sleep or device recovery."""
+        with self._lock:
+            log.info("Reopening camera index=%s", self.device_index)
+            if self._cap is not None:
+                self._cap.release()
+                self._cap = None
+            return self.open()
 
     def close(self) -> None:
         with self._lock:

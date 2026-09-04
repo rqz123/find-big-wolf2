@@ -69,6 +69,7 @@ Bot 只执行 `telegram_credentials.yaml` 中 `chat_id` 对应私人聊天发出
 |---|---|
 | `/photo` | 立即拍摄并发送一张 JPEG 照片 |
 | `/clip` | 拍摄并发送默认 5 秒、2 FPS 的动态画面 |
+| `/camera` | 循环切换到下一台摄像头；只有一台时保持不变 |
 | `/pause` | 暂停自动检测，进入命令取图模式；`/photo`、`/clip` 仍可用 |
 | `/auto` | 恢复按 `schedule` 时间表自动检测 |
 | `/status` | 查看自动/暂停状态、摄像头索引和电脑本地时间 |
@@ -134,6 +135,7 @@ Bot 只执行 `telegram_credentials.yaml` 中 `chat_id` 对应私人聊天发出
 
 - 没有托盘图标：查看任务栏隐藏图标区域，并检查 `logs/smartcam.log`。
 - 找不到摄像头：关闭占用摄像头的软件，确认 Windows 摄像头权限后重启。
+- `/photo` 或 `/clip` 返回纯黑：程序会丢弃预热黑帧，并在连续黑帧时自动重新打开当前摄像头；查看日志是否出现 `reopening it`。若仍失败，再用托盘预览确认镜头隐私设置。
 - Telegram 没有收到图片：先向机器人发送 `/start`，再运行测试通知。
 - 日志出现 `Unauthorized`：在 BotFather 重新生成 Token 并更新凭据文件。
 - 日志出现 `chat not found`：清空 `chat_id`，重新发送 `/start` 后再测试。

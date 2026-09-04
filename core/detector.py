@@ -23,6 +23,9 @@ from utils.config_loader import save_config
 log = logging.getLogger("smartcam.detector")
 
 _MODE_B_IDLE_TIMEOUT = 10.0   # seconds of no motion before reverting to Mode A
+_COMMAND_WARMUP_FRAMES = 4
+_COMMAND_REOPEN_WARMUP_FRAMES = 8
+_COMMAND_WARMUP_DELAY = 0.12
 
 
 class MotionDetector:
@@ -173,31 +176,60 @@ class MotionDetector:
         return self._camera.device_index
 
     def capture_frame(self) -> Optional[np.ndarray]:
-        """Read one frame for an on-demand Telegram command."""
+        """Read a warmed, non-black frame for an on-demand Telegram command."""
         with self._command_capture_lock:
-            frame = self._camera.read_frame()
-            return frame.copy() if frame is not None else None
+            return self._capture_warmed_frame()
 
     def capture_frames(self, frame_count: int, fps: float) -> List[np.ndarray]:
         """Capture a short, low-frame-rate sequence without changing monitor mode."""
         count = max(1, int(frame_count))
         interval = 1.0 / max(0.2, float(fps))
-        frames: List[np.ndarray] = []
 
         with self._command_capture_lock:
+            first_frame = self._capture_warmed_frame()
+            if first_frame is None:
+                return []
+
+            frames: List[np.ndarray] = [first_frame]
             next_frame_at = time.monotonic()
-            for index in range(count):
-                frame = self._camera.read_frame()
-                if frame is not None:
-                    frames.append(frame.copy())
-                if index == count - 1:
-                    break
+            for _ in range(count - 1):
                 next_frame_at += interval
                 remaining = next_frame_at - time.monotonic()
                 if remaining > 0:
                     time.sleep(remaining)
+                frame = self._camera.read_frame()
+                if self.is_frame_usable(frame):
+                    frames.append(frame.copy())
 
         return frames
+
+    @staticmethod
+    def is_frame_usable(frame: Optional[np.ndarray]) -> bool:
+        """Reject empty and almost perfectly black camera warm-up frames."""
+        if frame is None or frame.size == 0:
+            return False
+        return float(frame.mean()) > 2.0 or float(frame.std()) > 2.0
+
+    def _capture_warmed_frame(self) -> Optional[np.ndarray]:
+        frame = self._read_warmup_sequence(_COMMAND_WARMUP_FRAMES)
+        if frame is not None:
+            return frame
+
+        log.warning("Camera returned only black/invalid frames; reopening it")
+        if not self._camera.reopen():
+            return None
+        self._prev_gray = None
+        return self._read_warmup_sequence(_COMMAND_REOPEN_WARMUP_FRAMES)
+
+    def _read_warmup_sequence(self, count: int) -> Optional[np.ndarray]:
+        latest: Optional[np.ndarray] = None
+        for index in range(count):
+            frame = self._camera.read_frame()
+            if self.is_frame_usable(frame):
+                latest = frame.copy()
+            if index < count - 1:
+                time.sleep(_COMMAND_WARMUP_DELAY)
+        return latest
 
     def set_preview_callback(
         self, cb: Optional[Callable[[np.ndarray], None]]
@@ -213,7 +245,7 @@ class MotionDetector:
     def set_camera_switched_callback(self, cb: Optional[Callable]) -> None:
         self._on_camera_switched = cb
 
-    def switch_camera(self, device_index: int) -> None:
+    def switch_camera(self, device_index: int) -> bool:
         """Switch to a different camera (thread-safe).
 
         Uses the camera_list provided at construction — does NOT call
@@ -223,7 +255,7 @@ class MotionDetector:
         """
         with self._switch_lock:
             if device_index == self._camera.device_index:
-                return
+                return True
 
             log.info(f"Switching camera {self._camera.device_index} -> {device_index}")
             self._camera.close()
@@ -233,7 +265,7 @@ class MotionDetector:
             if not self._camera.open():
                 log.error(f"Failed to open camera index={device_index}")
                 self._on_status_change("error")
-                return
+                return False
 
             self._cfg["camera"]["device_index"] = device_index
             try:
@@ -251,6 +283,30 @@ class MotionDetector:
                     self._on_camera_switched(self._camera_list, device_index)
                 except Exception as exc:
                     log.warning(f"on_camera_switched callback error: {exc}")
+            return True
+
+    @property
+    def camera_count(self) -> int:
+        return len(self._camera_list)
+
+    def cycle_camera(self) -> Optional[Tuple[int, str]]:
+        """Switch to the next enumerated camera, wrapping at the end."""
+        if len(self._camera_list) <= 1:
+            return None
+
+        current_index = self._camera.device_index
+        current_position = next(
+            (
+                position
+                for position, (device_index, _name) in enumerate(self._camera_list)
+                if device_index == current_index
+            ),
+            -1,
+        )
+        next_camera = self._camera_list[(current_position + 1) % len(self._camera_list)]
+        if not self.switch_camera(next_camera[0]):
+            return None
+        return next_camera
 
     # ------------------------------------------------------------------
     # Main loop

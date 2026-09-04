@@ -85,6 +85,26 @@ class TelegramCameraControllerTests(unittest.TestCase):
         self.notifier.send_animation.assert_called_once()
         self.detector.capture_frames.assert_called_once_with(4, 2.0)
 
+    def test_camera_cycles_to_next_device(self) -> None:
+        self.detector.camera_count = 2
+        self.detector.cycle_camera.return_value = (1, "Integrated Webcam")
+
+        self.controller.handle("/camera")
+
+        self.detector.cycle_camera.assert_called_once()
+        response = self.notifier.send_message.call_args.args[0]
+        self.assertIn("Integrated Webcam", response)
+        self.assertIn("1", response)
+
+    def test_camera_does_nothing_with_single_device(self) -> None:
+        self.detector.camera_count = 1
+
+        self.controller.handle("/camera")
+
+        self.detector.cycle_camera.assert_not_called()
+        response = self.notifier.send_message.call_args.args[0]
+        self.assertIn("只有一台", response)
+
 
 if __name__ == "__main__":
     unittest.main()

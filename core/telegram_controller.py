@@ -20,6 +20,7 @@ log = logging.getLogger("smartcam.telegram.controller")
 _HELP_TEXT = """SmartCam Watcher 命令
 /photo - 立即拍摄一张照片
 /clip - 拍摄几秒低帧率动态画面
+/camera - 循环切换到下一台摄像头
 /auto - 启用按时间表自动检测
 /pause - 暂停自动检测（仍可手动取图）
 /status - 查看当前状态
@@ -59,6 +60,8 @@ class TelegramCameraController:
             "/photo": self._photo,
             "/snapshot": self._photo,
             "/clip": self._clip,
+            "/camera": self._camera,
+            "/switch": self._camera,
             "/auto": self._auto,
             "/resume": self._auto,
             "/pause": self._pause,
@@ -73,7 +76,11 @@ class TelegramCameraController:
     def send_motion_alert(self, image_path: str, event_type: str) -> None:
         """Turn an automatic event into a short animation, with photo fallback."""
         first_frame = cv2.imread(image_path)
-        frames = [first_frame] if first_frame is not None else []
+        frames = (
+            [first_frame]
+            if MotionDetector.is_frame_usable(first_frame)
+            else []
+        )
         frames.extend(self._capture_remaining_frames(len(frames)))
 
         event_label = "光线变化" if event_type == "lighting" else "检测到移动"
@@ -116,6 +123,21 @@ class TelegramCameraController:
             f"SmartCam 动态画面\n{self._timestamp()}",
         ):
             self._notifier.send_message("动态画面发送失败，请查看电脑端日志。")
+
+    def _camera(self) -> None:
+        if self._detector.camera_count <= 1:
+            self._notifier.send_message("当前只有一台摄像头，保持不变。")
+            return
+
+        selected = self._detector.cycle_camera()
+        if selected is None:
+            self._notifier.send_message("摄像头切换失败，请查看电脑端日志。")
+            return
+
+        device_index, name = selected
+        self._notifier.send_message(
+            f"已切换摄像头：{name}\n设备索引：{device_index}"
+        )
 
     def _auto(self) -> None:
         active_now = is_work_time(self._cfg)
@@ -171,7 +193,7 @@ class TelegramCameraController:
     def _write_gif(self, frames: List[np.ndarray], output_path: Path) -> None:
         images: List[Image.Image] = []
         for frame in frames:
-            if frame is None or frame.size == 0:
+            if not MotionDetector.is_frame_usable(frame):
                 continue
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             image = Image.fromarray(rgb)
