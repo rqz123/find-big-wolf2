@@ -57,7 +57,7 @@ py -3.12 -m venv venv
 
 程序会在只有一个私人会话时自动取得并保存 `chat_id`，随后发送测试图片。重新启动程序后，Bot 会注册命令菜单并开始接收命令。如果机器人收到过多个私人用户的消息，程序会拒绝自动选择，避免把摄像头图片发错人；此时需要手动填写目标 `chat_id`。
 
-完整说明见 [Telegram 设置指南](doc/Telegram_Setup.md)。
+完整说明见 [Telegram 设置指南](doc/Telegram_Setup.md)；权限边界、威胁模型和加固建议见 [Telegram 安全指南](doc/Telegram_Security.md)。
 
 > `telegram_credentials.yaml` 已被 Git 忽略。Bot Token 相当于密码，不要提交、截图或发送给他人。也可以使用环境变量 `SMARTCAM_TELEGRAM_BOT_TOKEN` 和 `SMARTCAM_TELEGRAM_CHAT_ID`，其值优先于凭据文件。
 

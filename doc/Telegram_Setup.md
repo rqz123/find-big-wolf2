@@ -43,6 +43,7 @@ SmartCam Watcher 使用 Telegram 官方 Bot API 发送告警动态画面、按�
 - 只有凭据文件中完全匹配的私人 `chat_id` 可以控制摄像头；其他聊天的命令不会执行。
 - 也可以不用凭据文件，改用环境变量：
   `SMARTCAM_TELEGRAM_BOT_TOKEN` 和 `SMARTCAM_TELEGRAM_CHAT_ID`。
+- 完整威胁模型、首次绑定风险、多人权限设计和泄露处置见 [Telegram 安全指南](Telegram_Security.md)。
 
 ## 故障排查
 

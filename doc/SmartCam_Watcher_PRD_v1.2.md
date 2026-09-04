@@ -184,4 +184,5 @@ main.py
 
 - 根目录 `README.md`：安装、配置、运行和排错
 - `doc/Telegram_Setup.md`：手机 Bot 与凭据设置
+- `doc/Telegram_Security.md`：权限边界、威胁模型和安全加固
 - `CHANGELOG.md`：版本变化

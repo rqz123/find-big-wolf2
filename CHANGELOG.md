@@ -10,6 +10,7 @@
 - 手动暂停/恢复监控
 - Telegram `/photo`、`/clip`、`/auto`、`/pause`、`/status` 和 `/help` 远程命令
 - Telegram `/camera` 循环摄像头切换命令
+- Telegram Bot 与摄像头安全指南
 - 仅允许配置的私人 Chat ID 控制摄像头
 - 完整 README、Telegram 设置指南和 PRD v1.2
 - 可公开提交的 `config.example.yaml`
