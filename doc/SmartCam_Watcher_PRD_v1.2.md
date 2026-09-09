@@ -8,7 +8,7 @@
 
 ## 1. 产品目标
 
-SmartCam Watcher 在指定时间段内监测 Windows 摄像头画面，识别光线变化和人员/物体移动，将带时间戳的低帧率动态画面推送到用户的 Telegram 手机 App。用户也可以从 Bot 安全地请求照片或连续画面，并切换自动检测与暂停状态。产品以系统托盘方式运行，优先满足低干扰、易配置、远程可控和告警可追溯。
+SmartCam Watcher 在指定时间段内监测 Windows 摄像头画面，识别暗到亮和局部移动，并在本机确认画面中是否有人。暗到亮发送文字提醒，确认有人时将带时间戳的低帧率动态画面推送到 Telegram 手机 App。用户也可以从 Bot 安全地请求照片或连续画面，并切换自动检测与暂停状态。产品以系统托盘方式运行，优先满足低干扰、易配置、远程可控和告警可追溯。
 
 ## 2. 使用场景
 
@@ -33,21 +33,28 @@ SmartCam Watcher 在指定时间段内监测 Windows 摄像头画面，识别光
 
 - 模式 A：每 `poll_interval_sec` 秒分析一帧，减少计算量。
 - 模式 B：检测到变化后按 `fps_high` 分析画面；连续 10 秒无变化后返回模式 A。
-- 光线变化：比较相邻模糊灰度帧的平均亮度差。
+- 光线变化：比较相邻模糊灰度帧的有方向平均亮度差；暗到亮告警，亮到暗忽略。
 - 局部移动：帧差二值化、膨胀、轮廓提取，并按最小面积过滤噪声。
+- 保存触发前约 3 秒的 2 FPS 滚动画面，供人物确认和 GIF 使用。
+- 移动触发后若尚未确认人物，以 2 FPS 最多继续跟踪 15 秒；发现人物立即结束跟踪。
+- 黑帧不得参与变化检测；连续黑帧时自动重开摄像头。
 - 第一帧只建立基线，不产生告警。
 
 ### 3.3 告警抑制
 
-- 使用 `backoff_intervals_sec` 控制连续告警频率。
+- 使用 `backoff_intervals_sec` 控制连续告警频率，光线和移动事件分别维护状态。
 - 默认间隔配置为 5、15、30、60 分钟。
 - 长时间无告警后，根据 `quiet_reset_sec` 回到初始退避级别。
 - 每次实际告警将当前帧保存为 `logs/alert_YYYYMMDD_HHMMSS.jpg`。
+- `alert_*.jpg` 与 `person_*.jpg` 默认保留 7 天；启动时及运行中每 6 小时清理过期文件，不得影响日志或其他文件。
 
 ### 3.4 Telegram 通知
 
-- 自动告警默认采集 5 秒、2 FPS 连续 JPEG 帧，生成 GIF 后使用 `sendAnimation` 上传。
-- Telegram 手机端直接显示自动播放的动态画面；若动画生成或发送失败，使用 `sendPhoto` 回退到告警 JPEG。
+- 暗到亮事件始终发送文字提醒，不要求识别到人。
+- 移动事件先扫描触发前缓存和触发帧；若尚未确认人物，再以 2 FPS 最多跟踪 15 秒，由本地 NanoDet 扫描全图和重点区域；低置信度候选还需 YuNet 人脸确认。
+- 跟踪中一旦确认人物立即停止等待并发送；达到跟踪上限仍无人时发送文字提醒。
+- 确认有人时生成带绿色人物框的 GIF 并使用 `sendAnimation` 上传；未识别到人时只发文字。
+- 人物模型缺失或推理异常时采用安全优先策略发送 GIF；动画生成或发送失败时使用 `sendPhoto` 回退。
 - 媒体说明包含事件类型、本地日期、时间和时区。
 - Bot Token 与 Chat ID 从被 Git 忽略的凭据文件读取；同名环境变量可以覆盖文件值。
 - 用户向 Bot 发送 `/start` 后，程序可以自动发现唯一的私人 Chat ID。
@@ -91,7 +98,7 @@ SmartCam Watcher 在指定时间段内监测 Windows 摄像头画面，识别光
 ```text
 main.py
   ├─ Config / Logger
-  ├─ CameraCapture ──> MotionDetector ──> JPEG + GIF animation
+  ├─ CameraCapture ──> MotionDetector ──> PersonDetector ──> text / JPEG / GIF
   │          ▲              │                      │
   │          │              └──────────────────────┤
   │          └─ TelegramCameraController <─ commands
@@ -108,6 +115,7 @@ main.py
 | `main.py` | 初始化模块、连接回调、控制生命周期 |
 | `core/camera.py` | Windows PnP 名称查询、摄像头探测和线程安全的 DirectShow 采集 |
 | `core/detector.py` | 双模式检测、事件分类、告警退避、抓拍和命令帧序列采集 |
+| `core/person_detector.py` | OpenCV NanoDet + YuNet 本地人物确认、重点区域放大和人物框标注 |
 | `core/scheduler.py` | 本地工作时间判断及挂起/恢复 |
 | `core/telegram_controller.py` | 命令动作、GIF 生成、状态响应和自动告警媒体 |
 | `notify/telegram.py` | 凭据、Chat ID、消息/媒体 API、更新读取和网络重试 |
@@ -132,7 +140,8 @@ main.py
 - `config.yaml`：当前公开设置和摄像头索引，由 Git 跟踪；不得包含 Token 或 Chat ID。
 - `telegram_credentials.yaml`：Bot Token 和 Chat ID，Git 忽略。
 - `logs/smartcam.log`：按午夜轮换，保留 7 份。
-- `logs/alert_*.jpg`：实际触发的告警图片，不进入 Git。
+- `logs/alert_*.jpg`：实际触发的告警图片，不进入 Git，默认保留 7 天。
+- `logs/person_*.jpg`：识别到人时的最佳标注帧，不进入 Git，默认保留 7 天。
 
 完整字段、默认值和调优方向以根目录 `README.md` 为准。
 
@@ -151,19 +160,19 @@ main.py
 
 - Telegram 临时错误按 1、2、4 秒等间隔退避，服务端 `retry_after` 优先且最多等待 30 秒。
 - 单次发送最终失败时保留本机抓拍，并记录错误；当前不会自动补发历史告警。
-- 动态画面生成失败时，自动告警回退为事件 JPEG；命令取图失败会返回明确文字状态。
+- 动态画面生成失败时，人物告警优先回退为最佳人物 JPEG；命令取图失败会返回明确文字状态。
 - 同一个 Bot 若被多个进程同时长轮询，Telegram 会返回冲突；部署时只运行一个命令接收实例。
 - 摄像头连续读取失败达到阈值后进入红色错误状态。
 - 命令取图必须读取短预热序列并丢弃近乎纯黑的无效帧；预热后仍无有效画面时，原子重建当前摄像头采集句柄并重试。
-- 自动检测线程连续读取失败进入错误状态后不会自行无限重开；若命令取图的单次恢复仍失败，需要释放占用并重启。
+- 自动检测线程连续收到黑帧时会重开摄像头；底层连续读取失败仍进入错误状态，若单次恢复失败，需要释放占用并重启。
 - 调试预览回调异常不得终止检测线程。
 
 ## 8. 验收标准
 
 - 在 Windows 10/11 上枚举至少一台可用摄像头。
 - 工作时间内检测线程和调度线程正常启动。
-- 光线或轮廓变化满足阈值后在 `logs/` 生成 JPEG。
-- Telegram 测试通知能在手机收到文字与图片，自动告警能收到动态画面或 JPEG 回退。
+- 暗到亮或轮廓变化满足阈值后在 `logs/` 生成 JPEG。
+- 暗到亮在手机收到文字；移动但无人收到文字；确认有人收到动态画面或 JPEG 回退。
 - 已授权手机可执行 `/photo`、`/clip`、`/camera`、`/pause`、`/auto` 和 `/status`。
 - 未授权 Chat ID 的命令不会触发摄像头动作或收到响应。
 - 缺少 Token、错误 Token、无 `/start`、多个私人聊天和临时网络失败都有明确日志。
@@ -173,7 +182,7 @@ main.py
 ## 9. 当前限制
 
 - 仅在 Windows DirectShow 环境验证。
-- 不是连续录像、人员识别或专业入侵检测系统。
+- 不是连续录像、身份识别或专业入侵检测系统；人物检测只判断是否存在人，不识别其身份。
 - 告警发送采用内存线程，没有持久化待发送队列。
 - 动态画面是低帧率 GIF/Telegram 动画，不是实时视频流，也不包含声音。
 - Bot 命令采用 `getUpdates`，同一个 Bot 不支持多个 SmartCam 实例并行接收命令。
@@ -185,4 +194,5 @@ main.py
 - 根目录 `README.md`：安装、配置、运行和排错
 - `doc/Telegram_Setup.md`：手机 Bot 与凭据设置
 - `doc/Telegram_Security.md`：权限边界、威胁模型和安全加固
+- `doc/Detection_Accuracy.md`：历史画面分析、镜头摆位和阈值调校
 - `CHANGELOG.md`：版本变化

@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 from PIL import Image
 
+from core.person_detector import PersonScan
 from core.telegram_controller import TelegramCameraController
 
 
@@ -17,6 +18,7 @@ class TelegramCameraControllerTests(unittest.TestCase):
         self.detector.is_user_paused = False
         self.detector.is_suspended = False
         self.notifier = Mock()
+        self.person_detector = Mock()
         self.pause_change = Mock()
         self.controller = TelegramCameraController(
             cfg={
@@ -34,6 +36,7 @@ class TelegramCameraControllerTests(unittest.TestCase):
             detector=self.detector,
             notifier=self.notifier,
             on_pause_change=self.pause_change,
+            person_detector=self.person_detector,
         )
 
     def test_pause_keeps_manual_capture_available(self) -> None:
@@ -104,6 +107,112 @@ class TelegramCameraControllerTests(unittest.TestCase):
         self.detector.cycle_camera.assert_not_called()
         response = self.notifier.send_message.call_args.args[0]
         self.assertIn("只有一台", response)
+
+    def test_lighting_alert_is_text_only(self) -> None:
+        self.controller.send_motion_alert("unused.jpg", "lighting")
+
+        self.notifier.send_message.assert_called_once()
+        self.notifier.send_animation.assert_not_called()
+        self.detector.capture_frames.assert_not_called()
+        self.detector.capture_until.assert_not_called()
+        self.assertIn("由暗变亮", self.notifier.send_message.call_args.args[0])
+
+    @patch("core.telegram_controller.cv2.imread")
+    def test_movement_with_person_sends_annotated_animation(self, imread: Mock) -> None:
+        frame = np.full((30, 40, 3), 80, np.uint8)
+        imread.return_value = frame
+        self.detector.recent_frames.return_value = [frame]
+        self.detector.capture_frames.return_value = [frame, frame]
+        self.person_detector.scan.return_value = PersonScan(
+            available=True,
+            found=True,
+            frames=[frame, frame, frame],
+            max_confidence=0.82,
+        )
+        self.notifier.send_animation.return_value = True
+
+        self.controller.send_motion_alert("alert.jpg", "movement")
+
+        self.notifier.send_animation.assert_called_once()
+        self.notifier.send_message.assert_not_called()
+        self.detector.capture_until.assert_not_called()
+        self.assertIn("82%", self.notifier.send_animation.call_args.args[1])
+
+    @patch("core.telegram_controller.cv2.imread")
+    def test_movement_tracks_until_person_appears(self, imread: Mock) -> None:
+        frame = np.full((30, 40, 3), 80, np.uint8)
+        annotated = np.full((30, 40, 3), 100, np.uint8)
+        imread.return_value = frame
+        self.detector.recent_frames.return_value = [frame]
+        self.person_detector.scan.side_effect = [
+            PersonScan(True, False, [frame, frame]),
+            PersonScan(True, False, [frame]),
+            PersonScan(True, True, [annotated], 0.76, annotated),
+        ]
+
+        def capture_until(duration: float, fps: float, stop_when) -> list:
+            self.assertEqual(duration, 15.0)
+            self.assertEqual(fps, 2.0)
+            captured = []
+            for item in (frame, frame, frame):
+                captured.append(item)
+                if stop_when(item):
+                    break
+            return len(captured)
+
+        self.detector.capture_until.side_effect = capture_until
+        self.notifier.send_animation.return_value = True
+
+        self.controller.send_motion_alert("alert.jpg", "movement")
+
+        self.assertEqual(self.person_detector.scan.call_count, 3)
+        self.notifier.send_animation.assert_called_once()
+        self.notifier.send_message.assert_not_called()
+        self.assertIn("76%", self.notifier.send_animation.call_args.args[1])
+
+    @patch("core.telegram_controller.cv2.imread")
+    def test_movement_without_person_sends_text_only(self, imread: Mock) -> None:
+        frame = np.full((30, 40, 3), 80, np.uint8)
+        imread.return_value = frame
+        self.detector.recent_frames.return_value = [frame]
+        self.person_detector.scan.return_value = PersonScan(
+            available=True,
+            found=False,
+            frames=[frame],
+        )
+
+        def capture_until(_duration: float, _fps: float, stop_when) -> list:
+            frames = [frame, frame]
+            for item in frames:
+                stop_when(item)
+            return len(frames)
+
+        self.detector.capture_until.side_effect = capture_until
+
+        self.controller.send_motion_alert("alert.jpg", "movement")
+
+        self.notifier.send_message.assert_called_once()
+        self.notifier.send_animation.assert_not_called()
+        self.assertEqual(self.person_detector.scan.call_count, 3)
+        self.assertIn("未识别到人", self.notifier.send_message.call_args.args[0])
+
+    @patch("core.telegram_controller.cv2.imread")
+    def test_person_detector_failure_fails_open_with_animation(self, imread: Mock) -> None:
+        frame = np.full((30, 40, 3), 80, np.uint8)
+        imread.return_value = frame
+        self.detector.recent_frames.return_value = [frame]
+        self.detector.capture_frames.return_value = [frame, frame]
+        self.person_detector.scan.return_value = PersonScan(
+            available=False,
+            found=False,
+            frames=[frame, frame, frame],
+        )
+        self.notifier.send_animation.return_value = True
+
+        self.controller.send_motion_alert("alert.jpg", "movement")
+
+        self.notifier.send_animation.assert_called_once()
+        self.assertIn("识别暂不可用", self.notifier.send_animation.call_args.args[1])
 
 
 if __name__ == "__main__":

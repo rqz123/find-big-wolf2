@@ -12,6 +12,7 @@ import numpy as np
 from PIL import Image
 
 from core.detector import MotionDetector
+from core.person_detector import PersonDetector, PersonScan
 from core.scheduler import is_work_time
 from notify.telegram import TelegramNotifier
 
@@ -36,13 +37,18 @@ class TelegramCameraController:
         detector: MotionDetector,
         notifier: TelegramNotifier,
         on_pause_change: Optional[Callable[[bool], None]] = None,
+        person_detector: Optional[PersonDetector] = None,
     ) -> None:
         self._cfg = cfg
         self._detector = detector
         self._notifier = notifier
         self._on_pause_change = on_pause_change or (lambda _paused: None)
+        self._person_detector = (
+            person_detector if person_detector is not None else PersonDetector(cfg)
+        )
 
         telegram_cfg = cfg.get("telegram", {})
+        detection_cfg = cfg.get("detection", {})
         self._clip_duration_sec = max(
             1.0, min(10.0, float(telegram_cfg.get("clip_duration_sec", 5)))
         )
@@ -51,6 +57,16 @@ class TelegramCameraController:
         )
         self._clip_max_width = max(
             160, min(1280, int(telegram_cfg.get("clip_max_width", 640)))
+        )
+        self._pre_event_buffer_sec = max(
+            0.0, min(10.0, float(detection_cfg.get("pre_event_buffer_sec", 3)))
+        )
+        self._person_tracking_duration_sec = max(
+            1.0,
+            min(
+                60.0,
+                float(detection_cfg.get("person_tracking_duration_sec", 15)),
+            ),
         )
 
     def handle(self, command: str) -> None:
@@ -74,22 +90,64 @@ class TelegramCameraController:
         handler()
 
     def send_motion_alert(self, image_path: str, event_type: str) -> None:
-        """Turn an automatic event into a short animation, with photo fallback."""
-        first_frame = cv2.imread(image_path)
-        frames = (
-            [first_frame]
-            if MotionDetector.is_frame_usable(first_frame)
-            else []
-        )
-        frames.extend(self._capture_remaining_frames(len(frames)))
+        """Route light changes to text and confirmed people to an evidence GIF."""
+        if event_type == "lighting":
+            self._notifier.send_message(
+                f"SmartCam：房间由暗变亮，请注意可能有人进入。\n{self._timestamp()}"
+            )
+            return
 
-        event_label = "光线变化" if event_type == "lighting" else "检测到移动"
-        caption = f"SmartCam：{event_label}\n{self._timestamp()}"
-        if len(frames) >= 2 and self._send_frames(frames, caption):
+        pre_event_count = max(
+            1, int(round(self._pre_event_buffer_sec * self._clip_fps))
+        )
+        frames = self._detector.recent_frames(
+            self._pre_event_buffer_sec, pre_event_count
+        )
+        first_frame = cv2.imread(image_path)
+        if MotionDetector.is_frame_usable(first_frame):
+            frames.append(first_frame)
+
+        scan = self._person_detector.scan(frames)
+        if scan.available and not scan.found:
+            scan = self._track_for_person(scan)
+        elif not scan.available:
+            # Without local inference, keep the existing fail-open behaviour and
+            # send a short evidence clip for manual review.
+            scan.frames.extend(self._capture_post_frames())
+
+        if scan.available and not scan.found:
+            self._notifier.send_message(
+                "SmartCam：检测到移动，但在 "
+                f"{self._person_tracking_duration_sec:g} 秒跟踪中未识别到人。\n"
+                f"{self._timestamp()}"
+            )
+            return
+
+        fallback_path = image_path
+        if scan.available:
+            if scan.best_frame is not None:
+                alert_path = Path(image_path)
+                evidence_path = alert_path.with_name(
+                    alert_path.name.replace("alert_", "person_", 1)
+                )
+                if cv2.imwrite(str(evidence_path), scan.best_frame):
+                    log.info("Best person evidence saved: %s", evidence_path)
+                    fallback_path = str(evidence_path)
+            caption = (
+                f"SmartCam：检测到人（最高置信度 {scan.max_confidence:.0%}）\n"
+                f"{self._timestamp()}"
+            )
+        else:
+            caption = (
+                "SmartCam：检测到移动；人物识别暂不可用，已发送画面供确认。\n"
+                f"{self._timestamp()}"
+            )
+
+        if len(scan.frames) >= 2 and self._send_frames(scan.frames, caption):
             return
 
         log.warning("Animation unavailable; falling back to the alert photo")
-        self._notifier.send_alert(image_path, caption)
+        self._notifier.send_alert(fallback_path, caption)
 
     def _help(self) -> None:
         self._notifier.send_message(_HELP_TEXT)
@@ -174,11 +232,55 @@ class TelegramCameraController:
     def _frame_count(self) -> int:
         return max(2, int(round(self._clip_duration_sec * self._clip_fps)))
 
-    def _capture_remaining_frames(self, existing_count: int) -> List[np.ndarray]:
-        remaining = max(0, self._frame_count - existing_count)
-        if remaining == 0:
-            return []
-        return self._detector.capture_frames(remaining, self._clip_fps)
+    def _capture_post_frames(self) -> List[np.ndarray]:
+        return self._detector.capture_frames(self._frame_count, self._clip_fps)
+
+    def _track_for_person(self, initial_scan: PersonScan) -> PersonScan:
+        """Inspect new frames as they arrive and stop at the first confirmed person."""
+        log.info(
+            "No person in initial evidence; tracking for up to %s seconds at %s FPS",
+            self._person_tracking_duration_sec,
+            self._clip_fps,
+        )
+        evidence_frames = list(initial_scan.frames)
+        available = True
+        found = False
+        max_confidence = initial_scan.max_confidence
+        best_frame = initial_scan.best_frame
+
+        def inspect(frame: np.ndarray) -> bool:
+            nonlocal available, found, max_confidence, best_frame
+            frame_scan = self._person_detector.scan([frame])
+            evidence_frames.extend(frame_scan.frames)
+            if not frame_scan.available:
+                available = False
+                return True
+            if frame_scan.found:
+                found = True
+                max_confidence = max(max_confidence, frame_scan.max_confidence)
+                if frame_scan.best_frame is not None:
+                    best_frame = frame_scan.best_frame
+                return True
+            return False
+
+        captured_count = self._detector.capture_until(
+            self._person_tracking_duration_sec,
+            self._clip_fps,
+            inspect,
+        )
+        if found:
+            log.info("Person confirmed during tracking after %s frame(s)", captured_count)
+        elif not available:
+            log.warning("Person tracking stopped because inference became unavailable")
+        else:
+            log.info("Person tracking ended after %s frame(s) without a match", captured_count)
+        return PersonScan(
+            available=available,
+            found=found,
+            frames=evidence_frames,
+            max_confidence=max_confidence,
+            best_frame=best_frame,
+        )
 
     def _send_frames(self, frames: List[np.ndarray], caption: str) -> bool:
         with tempfile.TemporaryDirectory(prefix="smartcam-clip-") as temp_dir:

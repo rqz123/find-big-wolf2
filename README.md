@@ -1,11 +1,13 @@
 # SmartCam Watcher
 
-SmartCam Watcher 是一个运行于 Windows 系统托盘的轻量级摄像头监控工具。它在指定工作时间内检测光线变化和局部移动，通过 Telegram Bot 将低帧率动态画面和时间戳发送到手机，也接受手机端的安全远程取图与模式控制命令。
+SmartCam Watcher 是一个运行于 Windows 系统托盘的轻量级摄像头监控工具。它在指定工作时间内检测暗到亮的光线变化和局部移动，并在电脑本地确认画面中是否有人。通过 Telegram Bot，开灯事件发送文字提醒，确认有人时发送低帧率动态画面，也接受手机端的安全远程取图与模式控制命令。
 
 ## 功能
 
-- 双模式检测：低频轮询与短时高帧率检测自动切换
-- 区分全局光线变化和局部移动
+- 双模式检测：常态 2 FPS 与短时高帧率检测自动切换
+- 区分暗到亮、暗化和局部移动，只对暗到亮发开灯提醒
+- OpenCV NanoDet + YuNet 双门槛本地人物识别；画面不上传到识别云服务
+- 3 秒触发前缓存与 5 秒触发后画面，提高抓到经过人员的概率
 - 自适应告警间隔，减少同一活动造成的重复通知
 - Telegram 动态画面告警、命令取图和远程暂停/恢复
 - 自动发现 Windows 摄像头，并显示设备友好名称
@@ -87,11 +89,23 @@ Bot 只执行 `telegram_credentials.yaml` 中 `chat_id` 对应私人聊天发出
 | `schedule.end` | `18:00` | 每日监控结束时间，不包含该分钟 |
 | `schedule.weekdays` | `[0,1,2,3,4]` | Python 星期编号：周一为 0，周日为 6 |
 | `camera.device_index` | `-1` | `-1` 表示首次启动时选择摄像头 |
-| `camera.poll_interval_sec` | `30` | 模式 A 的采样间隔（秒） |
+| `camera.poll_interval_sec` | `0.5` | 模式 A 的采样间隔（秒）；当前为 2 FPS，便于抓住经过人员 |
 | `camera.fps_high` | `15` | 模式 B 与调试预览的目标帧率 |
 | `detection.pixel_threshold` | `25` | 帧差二值化阈值；越低越敏感 |
 | `detection.contour_min_area` | `800` | 最小移动轮廓面积；越低越敏感 |
 | `detection.brightness_change_threshold` | `25` | 全画面平均亮度变化阈值 |
+| `detection.evidence_fps` | `2` | 触发前证据缓存帧率 |
+| `detection.pre_event_buffer_sec` | `3` | 保留触发前画面的秒数 |
+| `detection.person_tracking_duration_sec` | `15` | 移动触发后继续逐帧寻找人物的最长秒数 |
+| `detection.evidence_retention_days` | `7` | 自动告警与人物证据图片的本地保留天数 |
+| `detection.evidence_cleanup_interval_hours` | `6` | 过期证据图片的检查间隔（小时） |
+| `detection.person_model_path` | `models/person_detection_nanodet_2022nov.onnx` | 本地人物识别模型 |
+| `detection.person_confidence_threshold` | `0.30` | 人物候选门槛 |
+| `detection.person_direct_confidence_threshold` | `0.50` | 无需人脸辅助即可确认人物的门槛 |
+| `detection.face_model_path` | `models/face_detection_yunet_2023mar.onnx` | 低置信度候选的人脸确认模型 |
+| `detection.face_confidence_threshold` | `0.60` | 人脸确认门槛 |
+| `detection.person_detection_regions` | 见配置文件 | 全图及重点区域，坐标为归一化 `x1,y1,x2,y2` |
+| `detection.person_nms_threshold` | `0.3` | 重叠人物框合并阈值，避免同一人出现多个框 |
 | `detection.backoff_intervals_sec` | `[300,900,1800,3600]` | 连续告警的递增抑制间隔 |
 | `detection.quiet_reset_sec` | `1800` | 安静后重置告警退避的秒数 |
 | `telegram.timeout_sec` | `20` | Telegram 读取超时 |
@@ -106,14 +120,16 @@ Bot 只执行 `telegram_credentials.yaml` 中 `chat_id` 对应私人聊天发出
 
 ## 检测与告警流程
 
-1. 模式 A 每隔 `poll_interval_sec` 读取一帧。
-2. 全局亮度变化超过阈值时分类为 `lighting`；局部轮廓超过面积阈值时分类为 `movement`。
-3. 检测到变化后进入模式 B，按 `fps_high` 读取画面。
-4. 模式 B 连续 10 秒没有变化后回到模式 A。
-5. 满足告警间隔时，将 JPEG 保存到 `logs/alert_YYYYMMDD_HHMMSS.jpg`。
-6. 后台线程继续低帧率取图并生成几秒 GIF，通过 Telegram `sendAnimation` 发送；生成失败时回退到原始 JPEG。
-7. 命令监听线程通过 `getUpdates` 长轮询接收手机命令，只接受配置的私人 `chat_id`。
-8. 网络超时、Telegram 限流或服务端错误会指数退避重试；配置或鉴权错误直接记录日志。
+1. 模式 A 每隔 `poll_interval_sec` 读取一帧，并保存最近 3 秒低帧率画面。
+2. 全局亮度从暗变亮超过阈值时分类为 `lighting`；亮度变暗只更新基线，不告警；局部轮廓超过面积阈值时分类为 `movement`。
+3. 暗到亮立即发送文字提醒，不要求识别到人，也不发送图片。
+4. 移动事件先检查触发前缓存和触发帧；若尚未看到人，摄像头最多继续跟踪 15 秒，以 2 FPS 在本机用 NanoDet 扫描全图和重点区域；低置信度人物候选还必须通过 YuNet 人脸确认。
+5. 跟踪期间一旦确认有人便停止等待，人物框以绿色标出并发送 GIF，同时把最佳人物帧保存为 `logs/person_*.jpg`；完整窗口内仍未识别到人时只发文字。
+6. 若人物模型缺失或推理失败，系统采用安全优先策略发送 GIF，避免因识别故障漏掉真实人员。
+7. 光线和移动分别计算自适应告警间隔，因此开灯文字不会压制紧随其后的人物动态画面。
+8. 所有触发帧仍保存为 `logs/alert_YYYYMMDD_HHMMSS.jpg`；`alert_*.jpg` 和 `person_*.jpg` 超过 7 天后自动清除，黑帧不会进入检测和告警。
+9. 命令监听线程通过 `getUpdates` 长轮询接收手机命令，只接受配置的私人 `chat_id`。
+10. 网络超时、Telegram 限流或服务端错误会指数退避重试；配置或鉴权错误直接记录日志。
 
 ## 系统托盘
 
@@ -132,6 +148,8 @@ Bot 只执行 `telegram_credentials.yaml` 中 `chat_id` 对应私人聊天发出
 ## 日志和排错
 
 日志写入 `logs/smartcam.log`，每天午夜轮换并保留 7 份。`logs/` 不进入 Git。
+
+告警触发帧保存在 `logs/alert_*.jpg`，识别到人时另存带绿色人物框的 `logs/person_*.jpg`；两类自动证据图片默认保留 7 天，程序启动时及运行中每 6 小时清理一次。`/photo`、`/clip` 及发送用 GIF 是临时文件，完成后自动删除。历史画面分析、镜头摆位和阈值调校见 [检测准确度指南](doc/Detection_Accuracy.md)。
 
 - 没有托盘图标：查看任务栏隐藏图标区域，并检查 `logs/smartcam.log`。
 - 找不到摄像头：关闭占用摄像头的软件，确认 Windows 摄像头权限后重启。
@@ -163,6 +181,7 @@ Bot 只执行 `telegram_credentials.yaml` 中 `chat_id` 对应私人聊天发出
 ```text
 find-big-wolf2/
 ├── core/                       摄像头、检测器、动态画面和命令控制
+├── models/                     本地 NanoDet 人物模型及第三方许可证
 ├── notify/telegram.py          Telegram Bot API 消息与媒体发送
 ├── notify/telegram_commands.py Telegram 命令长轮询和访问控制
 ├── ui/                         系统托盘和调试预览

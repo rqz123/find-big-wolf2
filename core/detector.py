@@ -11,7 +11,10 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 from datetime import datetime
+from math import ceil
+from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 import cv2
@@ -78,7 +81,30 @@ class MotionDetector:
         self._brightness_threshold: float = det_cfg.get("brightness_change_threshold", 25)
         self._backoff_intervals: list = det_cfg.get("backoff_intervals_sec", [300, 900, 1800, 3600])
         self._quiet_reset_sec: float = det_cfg.get("quiet_reset_sec", 1800)
-        self._backoff_index: int = 0
+        self._alert_state = {
+            "lighting": {"last_time": 0.0, "backoff_index": 0},
+            "movement": {"last_time": 0.0, "backoff_index": 0},
+        }
+
+        self._evidence_fps = max(0.5, float(det_cfg.get("evidence_fps", 2)))
+        self._evidence_buffer_sec = max(
+            1.0, float(det_cfg.get("pre_event_buffer_sec", 3))
+        )
+        self._evidence_retention_days = max(
+            1.0, float(det_cfg.get("evidence_retention_days", 7))
+        )
+        self._evidence_cleanup_interval = max(
+            3600.0,
+            float(det_cfg.get("evidence_cleanup_interval_hours", 6)) * 3600.0,
+        )
+        self._next_evidence_cleanup_at = 0.0
+        evidence_capacity = max(
+            2, ceil(self._evidence_fps * self._evidence_buffer_sec) + 1
+        )
+        self._recent_frames = deque(maxlen=evidence_capacity)
+        self._recent_frames_lock = threading.Lock()
+        self._last_evidence_frame_at = 0.0
+        self._invalid_monitor_frames = 0
 
         self._mode: str = "A"
         self._suspended: bool = False
@@ -109,6 +135,10 @@ class MotionDetector:
     def start(self) -> None:
         if self._running:
             return
+        self._cleanup_old_evidence()
+        self._next_evidence_cleanup_at = (
+            time.monotonic() + self._evidence_cleanup_interval
+        )
         if not self._camera.open():
             self._on_status_change("error")
             return
@@ -203,6 +233,55 @@ class MotionDetector:
 
         return frames
 
+    def capture_until(
+        self,
+        duration_sec: float,
+        fps: float,
+        stop_when: Callable[[np.ndarray], bool],
+    ) -> int:
+        """Capture for a bounded period, stopping as soon as a frame matches."""
+        duration = max(0.1, float(duration_sec))
+        interval = 1.0 / max(0.2, float(fps))
+
+        with self._command_capture_lock:
+            first_frame = self._capture_warmed_frame()
+            if first_frame is None:
+                return 0
+
+            captured_count = 0
+            started_at = time.monotonic()
+            deadline = started_at + duration
+            next_frame_at = started_at
+            frame: Optional[np.ndarray] = first_frame
+
+            while not self._stop_event.is_set():
+                if self.is_frame_usable(frame):
+                    captured = frame.copy()
+                    captured_count += 1
+                    if stop_when(captured):
+                        break
+
+                next_frame_at += interval
+                if next_frame_at > deadline:
+                    break
+                remaining = next_frame_at - time.monotonic()
+                if remaining > 0:
+                    time.sleep(remaining)
+                frame = self._camera.read_frame()
+
+        return captured_count
+
+    def recent_frames(self, seconds: float, max_count: int) -> List[np.ndarray]:
+        """Return a copy of the low-rate rolling buffer preceding an event."""
+        cutoff = time.monotonic() - max(0.0, float(seconds))
+        with self._recent_frames_lock:
+            frames = [
+                frame.copy()
+                for captured_at, frame in self._recent_frames
+                if captured_at >= cutoff
+            ]
+        return frames[-max(1, int(max_count)):]
+
     @staticmethod
     def is_frame_usable(frame: Optional[np.ndarray]) -> bool:
         """Reject empty and almost perfectly black camera warm-up frames."""
@@ -261,6 +340,8 @@ class MotionDetector:
             self._camera.close()
             self._camera.device_index = device_index
             self._prev_gray = None  # reset frame-diff baseline
+            with self._recent_frames_lock:
+                self._recent_frames.clear()
 
             if not self._camera.open():
                 log.error(f"Failed to open camera index={device_index}")
@@ -315,6 +396,7 @@ class MotionDetector:
     def _loop(self) -> None:
         self._on_status_change("active")
         while not self._stop_event.is_set():
+            self._maybe_cleanup_evidence()
             if self._suspended and self._preview_update is None:
                 # Suspended outside work hours and no preview open -> wait
                 self._suspend_event.clear()
@@ -325,6 +407,22 @@ class MotionDetector:
             if frame is None:
                 time.sleep(1)
                 continue
+            if not self.is_frame_usable(frame):
+                self._invalid_monitor_frames += 1
+                log.warning(
+                    "Ignoring black/invalid monitoring frame (consecutive=%s)",
+                    self._invalid_monitor_frames,
+                )
+                if self._invalid_monitor_frames >= _COMMAND_WARMUP_FRAMES:
+                    log.warning("Monitoring camera stayed black; reopening it")
+                    if self._camera.reopen():
+                        self._prev_gray = None
+                    self._invalid_monitor_frames = 0
+                self._interruptible_sleep(_COMMAND_WARMUP_DELAY)
+                continue
+            self._invalid_monitor_frames = 0
+
+            self._record_recent_frame(frame)
 
             if self._preview_update:
                 try:
@@ -356,6 +454,53 @@ class MotionDetector:
         self._wakeup_event.wait(timeout=seconds)
         self._wakeup_event.clear()
 
+    def _record_recent_frame(self, frame: np.ndarray) -> None:
+        now = time.monotonic()
+        if now - self._last_evidence_frame_at < 1.0 / self._evidence_fps:
+            return
+        with self._recent_frames_lock:
+            self._recent_frames.append((now, frame.copy()))
+        self._last_evidence_frame_at = now
+
+    def _maybe_cleanup_evidence(self) -> None:
+        now = time.monotonic()
+        if now < self._next_evidence_cleanup_at:
+            return
+        self._cleanup_old_evidence()
+        self._next_evidence_cleanup_at = now + self._evidence_cleanup_interval
+
+    def _cleanup_old_evidence(self, now: Optional[float] = None) -> int:
+        """Delete only expired automatic alert/person JPEG evidence files."""
+        cutoff = (time.time() if now is None else now) - (
+            self._evidence_retention_days * 86400.0
+        )
+        removed = 0
+        log_dir = Path(self._log_dir)
+        for pattern in ("alert_*.jpg", "person_*.jpg"):
+            for image_path in log_dir.glob(pattern):
+                try:
+                    if image_path.is_file() and image_path.stat().st_mtime < cutoff:
+                        image_path.unlink()
+                        removed += 1
+                except OSError as exc:
+                    log.warning(
+                        "Could not remove expired evidence %s (%s)",
+                        image_path,
+                        type(exc).__name__,
+                    )
+        if removed:
+            log.info(
+                "Removed %s expired evidence image(s); retention=%s days",
+                removed,
+                self._evidence_retention_days,
+            )
+        else:
+            log.debug(
+                "Evidence cleanup complete; no images older than %s days",
+                self._evidence_retention_days,
+            )
+        return removed
+
     # ------------------------------------------------------------------
     # Change classification
     # ------------------------------------------------------------------
@@ -380,10 +525,17 @@ class MotionDetector:
         self._prev_gray = gray
 
         # Lighting change: whole-frame brightness shift
-        brightness_delta = abs(float(gray.mean()) - float(prev_gray.mean()))
-        if brightness_delta > self._brightness_threshold:
-            log.debug(f"Lighting change detected (brightness delta={brightness_delta:.1f})")
-            return "lighting", True
+        brightness_delta = float(gray.mean()) - float(prev_gray.mean())
+        if abs(brightness_delta) > self._brightness_threshold:
+            if brightness_delta > 0:
+                log.debug(
+                    f"Dark-to-bright change detected (brightness delta={brightness_delta:.1f})"
+                )
+                return "lighting", True
+            log.debug(
+                f"Bright-to-dark change ignored (brightness delta={brightness_delta:.1f})"
+            )
+            return None, False
 
         # Movement: localised frame-diff contours
         diff = cv2.absdiff(prev_gray, gray)
@@ -403,24 +555,27 @@ class MotionDetector:
 
     def _trigger_alert(self, frame: np.ndarray, event_type: str) -> None:
         now = time.time()
-        elapsed = now - self._last_alert_time
+        state = self._alert_state.setdefault(
+            event_type, {"last_time": 0.0, "backoff_index": 0}
+        )
+        elapsed = now - state["last_time"]
 
         # Quiet reset: long gap since last alert means a new activity session
-        if self._backoff_index > 0 and elapsed > self._quiet_reset_sec:
+        if state["backoff_index"] > 0 and elapsed > self._quiet_reset_sec:
             log.info(f"Backoff reset — {elapsed:.0f}s since last alert (quiet period)")
-            self._backoff_index = 0
+            state["backoff_index"] = 0
 
-        current_debounce = self._backoff_intervals[self._backoff_index]
+        current_debounce = self._backoff_intervals[state["backoff_index"]]
         if elapsed < current_debounce:
             remaining = current_debounce - elapsed
             log.debug(f"Alert debounced — next in {remaining:.0f}s (interval={current_debounce}s)")
             return
 
-        self._last_alert_time = now
-        next_idx = min(self._backoff_index + 1, len(self._backoff_intervals) - 1)
+        state["last_time"] = now
+        next_idx = min(state["backoff_index"] + 1, len(self._backoff_intervals) - 1)
         next_interval = self._backoff_intervals[next_idx]
         log.info(f"Next alert interval: {next_interval}s")
-        self._backoff_index = next_idx
+        state["backoff_index"] = next_idx
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         img_path = os.path.join(self._log_dir, f"alert_{ts}.jpg")
