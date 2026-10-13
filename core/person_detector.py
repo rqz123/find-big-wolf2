@@ -58,7 +58,21 @@ class PersonDetector:
         )
         self._direct_confidence = max(
             self._confidence,
-            min(0.99, float(det_cfg.get("person_direct_confidence_threshold", 0.50))),
+            min(0.99, float(det_cfg.get("person_direct_confidence_threshold", 0.70))),
+        )
+        self._upright_confidence = max(
+            self._confidence,
+            min(
+                self._direct_confidence,
+                float(det_cfg.get("person_upright_confidence_threshold", 0.50)),
+            ),
+        )
+        self._upright_max_aspect_ratio = max(
+            0.5,
+            min(
+                3.0,
+                float(det_cfg.get("person_upright_max_aspect_ratio", 1.25)),
+            ),
         )
         self._face_confidence = max(
             0.1, min(0.99, float(det_cfg.get("face_confidence_threshold", 0.6)))
@@ -168,9 +182,23 @@ class PersonDetector:
     def _confirm_detections(self, frame: np.ndarray, candidates):
         confirmed = []
         for box, confidence in candidates:
-            if confidence >= self._direct_confidence or self._has_face_near(frame, box):
+            if (
+                confidence >= self._direct_confidence
+                or (
+                    confidence >= self._upright_confidence
+                    and self._is_upright_box(box)
+                )
+                or self._has_face_near(frame, box)
+            ):
                 confirmed.append((box, confidence))
         return confirmed
+
+    def _is_upright_box(self, box: Tuple[int, int, int, int]) -> bool:
+        """Reject wide, chair-like mid-confidence boxes without blocking small people."""
+        x1, y1, x2, y2 = box
+        width = max(1, x2 - x1)
+        height = max(1, y2 - y1)
+        return width / height <= self._upright_max_aspect_ratio
 
     def _has_face_near(self, frame: np.ndarray, box: Tuple[int, int, int, int]) -> bool:
         """Require face evidence before accepting a low-confidence person box."""

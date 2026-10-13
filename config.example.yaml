@@ -12,6 +12,15 @@ detection:
   pixel_threshold: 25
   contour_min_area: 800
   brightness_change_threshold: 25
+  # Fixed ceiling-light panels used to infer whether the occupancy lights are on.
+  lighting_state_regions:
+    - [0.52, 0.16, 0.64, 0.30]
+    - [0.83, 0.14, 1.00, 0.28]
+  lighting_state_pixel_threshold: 220
+  lighting_state_min_bright_ratio: 0.15
+  # Reduce motion sensitivity while the occupancy lights are off.
+  dark_motion_pixel_threshold_multiplier: 2.0
+  dark_motion_area_multiplier: 4.0
   evidence_fps: 2
   pre_event_buffer_sec: 3
   # After movement, keep looking for a person and stop early when one is found.
@@ -22,7 +31,10 @@ detection:
   person_model_path: models/person_detection_nanodet_2022nov.onnx
   # >= direct threshold passes; lower candidates also need a YuNet face.
   person_confidence_threshold: 0.30
-  person_direct_confidence_threshold: 0.50
+  person_direct_confidence_threshold: 0.70
+  # Mid-confidence candidates pass without a face only when the box is upright.
+  person_upright_confidence_threshold: 0.50
+  person_upright_max_aspect_ratio: 1.25
   face_model_path: models/face_detection_yunet_2023mar.onnx
   face_confidence_threshold: 0.60
   # Whole frame plus enlarged center/doorway regions (normalised x1,y1,x2,y2).

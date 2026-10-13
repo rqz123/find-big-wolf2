@@ -62,6 +62,42 @@ class MotionDetectorAlertTests(unittest.TestCase):
         self.assertEqual(self.detector._classify_change(bright), ("lighting", True))
         self.assertEqual(self.detector._classify_change(dark), (None, False))
 
+    def test_sensor_light_regions_detect_on_and_off_transitions(self) -> None:
+        self.detector._lighting_state_regions = [(0.0, 0.0, 1.0, 0.20)]
+        dark = np.full((100, 100, 3), 10, dtype=np.uint8)
+        light_on = dark.copy()
+        light_on[:20, :] = 255
+
+        self.assertEqual(self.detector._classify_change(dark), (None, False))
+        self.assertEqual(
+            self.detector._classify_change(light_on), ("lighting", True)
+        )
+        self.assertEqual(self.detector._classify_change(dark), (None, False))
+
+    def test_dark_room_uses_lower_motion_sensitivity(self) -> None:
+        self.detector._lighting_state_regions = [(0.0, 0.0, 1.0, 0.20)]
+        self.detector._dark_motion_pixel_threshold_multiplier = 2.0
+        self.detector._dark_motion_area_multiplier = 4.0
+        dark_base = np.zeros((100, 100, 3), dtype=np.uint8)
+        dark_motion = dark_base.copy()
+        dark_motion[40:80, 20:60] = 100
+
+        self.detector._classify_change(dark_base)
+        self.assertEqual(
+            self.detector._classify_change(dark_motion), (None, False)
+        )
+
+        self.detector._prev_gray = None
+        self.detector._room_lit = None
+        lit_base = dark_base.copy()
+        lit_base[:20, :] = 255
+        lit_motion = lit_base.copy()
+        lit_motion[40:80, 20:60] = 100
+        self.detector._classify_change(lit_base)
+        self.assertEqual(
+            self.detector._classify_change(lit_motion), ("movement", True)
+        )
+
     @patch("core.detector.time.sleep")
     def test_command_capture_discards_black_warmup_frames(
         self, _sleep: Mock

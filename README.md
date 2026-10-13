@@ -74,7 +74,7 @@ Bot 只执行 `telegram_credentials.yaml` 中 `chat_id` 对应私人聊天发出
 | `/camera` | 循环切换到下一台摄像头；只有一台时保持不变 |
 | `/pause` | 暂停自动检测，进入命令取图模式；`/photo`、`/clip` 仍可用 |
 | `/auto` | 恢复按 `schedule` 时间表自动检测 |
-| `/status` | 查看自动/暂停状态、摄像头索引和电脑本地时间 |
+| `/status` | 查看自动/暂停状态、感应灯及灵敏度、摄像头索引和电脑本地时间 |
 | `/help` | 显示命令列表 |
 
 动态画面在电脑端由连续 JPEG 帧生成 GIF，再通过 Telegram [`sendAnimation`](https://core.telegram.org/bots/api#sendanimation) 发送。这样比直接上传 MJPEG/AVI 更容易在 Telegram 手机端自动播放；Telegram 可能在云端将 GIF 转换为无声 MPEG-4 动画。
@@ -94,6 +94,11 @@ Bot 只执行 `telegram_credentials.yaml` 中 `chat_id` 对应私人聊天发出
 | `detection.pixel_threshold` | `25` | 帧差二值化阈值；越低越敏感 |
 | `detection.contour_min_area` | `800` | 最小移动轮廓面积；越低越敏感 |
 | `detection.brightness_change_threshold` | `25` | 全画面平均亮度变化阈值 |
+| `detection.lighting_state_regions` | 见配置文件 | 两块固定天花板感应灯区域，坐标为归一化 `x1,y1,x2,y2` |
+| `detection.lighting_state_pixel_threshold` | `220` | 灯区内判定为高亮像素的灰度门槛 |
+| `detection.lighting_state_min_bright_ratio` | `0.15` | 任一灯区达到此高亮像素比例即视为灯亮 |
+| `detection.dark_motion_pixel_threshold_multiplier` | `2.0` | 灯灭时帧差像素门槛倍率（25 → 50） |
+| `detection.dark_motion_area_multiplier` | `4.0` | 灯灭时移动轮廓面积门槛倍率（800 → 3200） |
 | `detection.evidence_fps` | `2` | 触发前证据缓存帧率 |
 | `detection.pre_event_buffer_sec` | `3` | 保留触发前画面的秒数 |
 | `detection.person_tracking_duration_sec` | `15` | 移动触发后继续逐帧寻找人物的最长秒数 |
@@ -101,7 +106,9 @@ Bot 只执行 `telegram_credentials.yaml` 中 `chat_id` 对应私人聊天发出
 | `detection.evidence_cleanup_interval_hours` | `6` | 过期证据图片的检查间隔（小时） |
 | `detection.person_model_path` | `models/person_detection_nanodet_2022nov.onnx` | 本地人物识别模型 |
 | `detection.person_confidence_threshold` | `0.30` | 人物候选门槛 |
-| `detection.person_direct_confidence_threshold` | `0.50` | 无需人脸辅助即可确认人物的门槛 |
+| `detection.person_direct_confidence_threshold` | `0.70` | 任意形状人物框无需人脸即可确认的高门槛 |
+| `detection.person_upright_confidence_threshold` | `0.50` | 竖直人物框无需人脸即可确认的中门槛 |
+| `detection.person_upright_max_aspect_ratio` | `1.25` | 中置信度框允许的最大宽高比，用于排除横宽的披衣椅子 |
 | `detection.face_model_path` | `models/face_detection_yunet_2023mar.onnx` | 低置信度候选的人脸确认模型 |
 | `detection.face_confidence_threshold` | `0.60` | 人脸确认门槛 |
 | `detection.person_detection_regions` | 见配置文件 | 全图及重点区域，坐标为归一化 `x1,y1,x2,y2` |
@@ -121,15 +128,16 @@ Bot 只执行 `telegram_credentials.yaml` 中 `chat_id` 对应私人聊天发出
 ## 检测与告警流程
 
 1. 模式 A 每隔 `poll_interval_sec` 读取一帧，并保存最近 3 秒低帧率画面。
-2. 全局亮度从暗变亮超过阈值时分类为 `lighting`；亮度变暗只更新基线，不告警；局部轮廓超过面积阈值时分类为 `movement`。
+2. 程序直接观察两块固定天花板感应灯：由灭到亮分类为 `lighting`，由亮到灭只更新状态；这种区域判定不受窗外日光和摄像头自动曝光影响。
 3. 暗到亮立即发送文字提醒，不要求识别到人，也不发送图片。
-4. 移动事件先检查触发前缓存和触发帧；若尚未看到人，摄像头最多继续跟踪 15 秒，以 2 FPS 在本机用 NanoDet 扫描全图和重点区域；低置信度人物候选还必须通过 YuNet 人脸确认。
-5. 跟踪期间一旦确认有人便停止等待，人物框以绿色标出并发送 GIF，同时把最佳人物帧保存为 `logs/person_*.jpg`；完整窗口内仍未识别到人时只发文字。
-6. 若人物模型缺失或推理失败，系统采用安全优先策略发送 GIF，避免因识别故障漏掉真实人员。
-7. 光线和移动分别计算自适应告警间隔，因此开灯文字不会压制紧随其后的人物动态画面。
-8. 所有触发帧仍保存为 `logs/alert_YYYYMMDD_HHMMSS.jpg`；`alert_*.jpg` 和 `person_*.jpg` 超过 7 天后自动清除，黑帧不会进入检测和告警。
-9. 命令监听线程通过 `getUpdates` 长轮询接收手机命令，只接受配置的私人 `chat_id`。
-10. 网络超时、Telegram 限流或服务端错误会指数退避重试；配置或鉴权错误直接记录日志。
+4. 感应灯亮时使用正常移动门槛；灯灭时像素差门槛提高 2 倍、轮廓面积门槛提高 4 倍，过滤暗环境中的小阴影和曝光变化，但保留大轮廓检测。
+5. 移动事件先检查触发前缓存和触发帧；若尚未看到人，摄像头最多继续跟踪 15 秒，以 2 FPS 在本机用 NanoDet 扫描全图和重点区域。70% 以上直接确认；50%–70% 只有竖直人物框可直接确认，横宽候选需要人脸；更低候选也必须通过 YuNet 人脸确认。
+6. 跟踪期间一旦确认有人便停止等待，人物框以绿色标出并发送 GIF，同时把最佳人物帧保存为 `logs/person_*.jpg`；完整窗口内仍未识别到人时只发文字。若告警开始时灯亮、跟踪期间灯已熄灭且始终无人，则取消这条待发送通知。
+7. 若人物模型缺失或推理失败，系统采用安全优先策略发送 GIF，避免因识别故障漏掉真实人员。
+8. 光线和移动分别计算自适应告警间隔，因此开灯文字不会压制紧随其后的人物动态画面。
+9. 所有触发帧仍保存为 `logs/alert_YYYYMMDD_HHMMSS.jpg`；`alert_*.jpg` 和 `person_*.jpg` 超过 7 天后自动清除，黑帧不会进入检测和告警。
+10. 命令监听线程通过 `getUpdates` 长轮询接收手机命令，只接受配置的私人 `chat_id`。
+11. 网络超时、Telegram 限流或服务端错误会指数退避重试；配置或鉴权错误直接记录日志。
 
 ## 系统托盘
 

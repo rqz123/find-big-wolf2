@@ -44,8 +44,8 @@ class MotionDetector:
         switch_camera() reuses this list instead of re-enumerating
         (re-enumerating while the detector holds a camera causes the
         open() call to fail and the list to shrink).
-    on_alert : Callable[[str], None]
-        Called with the snapshot file path when motion is detected.
+    on_alert : Callable[[str, str, Optional[bool]], None]
+        Called with snapshot path, event type, and light state at trigger time.
     on_camera_error : Callable
         Called when the camera fails repeatedly (signals tray to go red).
     on_status_change : Callable[[str], None]
@@ -79,6 +79,26 @@ class MotionDetector:
         self._pixel_threshold: int = det_cfg.get("pixel_threshold", 40)
         self._contour_min_area: int = det_cfg.get("contour_min_area", 1500)
         self._brightness_threshold: float = det_cfg.get("brightness_change_threshold", 25)
+        self._lighting_state_regions = self._validate_normalized_regions(
+            det_cfg.get("lighting_state_regions", [])
+        )
+        self._lighting_state_pixel_threshold = max(
+            1, min(254, int(det_cfg.get("lighting_state_pixel_threshold", 220)))
+        )
+        self._lighting_state_min_bright_ratio = max(
+            0.01,
+            min(
+                0.99,
+                float(det_cfg.get("lighting_state_min_bright_ratio", 0.15)),
+            ),
+        )
+        self._dark_motion_pixel_threshold_multiplier = max(
+            1.0,
+            float(det_cfg.get("dark_motion_pixel_threshold_multiplier", 2.0)),
+        )
+        self._dark_motion_area_multiplier = max(
+            1.0, float(det_cfg.get("dark_motion_area_multiplier", 4.0))
+        )
         self._backoff_intervals: list = det_cfg.get("backoff_intervals_sec", [300, 900, 1800, 3600])
         self._quiet_reset_sec: float = det_cfg.get("quiet_reset_sec", 1800)
         self._alert_state = {
@@ -112,6 +132,8 @@ class MotionDetector:
         self._running: bool = False
         self._thread: Optional[threading.Thread] = None
         self._prev_gray: Optional[np.ndarray] = None
+        self._room_lit: Optional[bool] = None
+        self._lighting_bright_ratio: float = 0.0
         self._last_alert_time: float = 0.0
         self._last_motion_time: float = 0.0
 
@@ -204,6 +226,10 @@ class MotionDetector:
     @property
     def current_device_index(self) -> int:
         return self._camera.device_index
+
+    @property
+    def is_room_lit(self) -> Optional[bool]:
+        return self._room_lit
 
     def capture_frame(self) -> Optional[np.ndarray]:
         """Read a warmed, non-black frame for an on-demand Telegram command."""
@@ -340,6 +366,7 @@ class MotionDetector:
             self._camera.close()
             self._camera.device_index = device_index
             self._prev_gray = None  # reset frame-diff baseline
+            self._room_lit = None
             with self._recent_frames_lock:
                 self._recent_frames.clear()
 
@@ -514,8 +541,20 @@ class MotionDetector:
           - ('movement', True)  : localised contour motion detected
           - (None, False)       : no significant change
         """
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (21, 21), 0)
+        raw_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(raw_gray, (21, 21), 0)
+
+        previous_room_lit = self._room_lit
+        if self._lighting_state_regions:
+            self._room_lit, self._lighting_bright_ratio = self._detect_room_lit(
+                raw_gray
+            )
+            if self._room_lit != previous_room_lit:
+                log.info(
+                    "Sensor light state: %s (bright-pixel ratio=%.1f%%)",
+                    "on" if self._room_lit else "off",
+                    self._lighting_bright_ratio * 100,
+                )
 
         if self._prev_gray is None:
             self._prev_gray = gray
@@ -524,9 +563,28 @@ class MotionDetector:
         prev_gray = self._prev_gray
         self._prev_gray = gray
 
-        # Lighting change: whole-frame brightness shift
         brightness_delta = float(gray.mean()) - float(prev_gray.mean())
-        if abs(brightness_delta) > self._brightness_threshold:
+        if self._lighting_state_regions and previous_room_lit is not None:
+            if not previous_room_lit and self._room_lit:
+                log.debug(
+                    "Sensor light switched on (brightness delta=%.1f)",
+                    brightness_delta,
+                )
+                return "lighting", True
+            if previous_room_lit and not self._room_lit:
+                log.debug(
+                    "Sensor light switched off; change ignored (brightness delta=%.1f)",
+                    brightness_delta,
+                )
+                return None, False
+            if abs(brightness_delta) > self._brightness_threshold:
+                log.debug(
+                    "Global brightness change ignored; sensor light state unchanged "
+                    "(delta=%.1f)",
+                    brightness_delta,
+                )
+                return None, False
+        elif abs(brightness_delta) > self._brightness_threshold:
             if brightness_delta > 0:
                 log.debug(
                     f"Dark-to-bright change detected (brightness delta={brightness_delta:.1f})"
@@ -538,16 +596,67 @@ class MotionDetector:
             return None, False
 
         # Movement: localised frame-diff contours
+        room_lit = self._room_lit is not False
+        pixel_threshold = self._pixel_threshold
+        min_area = float(self._contour_min_area)
+        if not room_lit:
+            pixel_threshold = min(
+                254,
+                round(
+                    pixel_threshold * self._dark_motion_pixel_threshold_multiplier
+                ),
+            )
+            min_area *= self._dark_motion_area_multiplier
         diff = cv2.absdiff(prev_gray, gray)
-        _, thresh = cv2.threshold(diff, self._pixel_threshold, 255, cv2.THRESH_BINARY)
+        _, thresh = cv2.threshold(diff, pixel_threshold, 255, cv2.THRESH_BINARY)
         thresh = cv2.dilate(thresh, None, iterations=2)
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for cnt in contours:
-            if cv2.contourArea(cnt) >= self._contour_min_area:
-                log.debug(f"Movement detected (contour area={cv2.contourArea(cnt):.0f})")
+            if cv2.contourArea(cnt) >= min_area:
+                log.debug(
+                    "Movement detected (contour area=%.0f, light=%s, "
+                    "pixel_threshold=%s, min_area=%.0f)",
+                    cv2.contourArea(cnt),
+                    "on" if room_lit else "off",
+                    pixel_threshold,
+                    min_area,
+                )
                 return "movement", True
 
         return None, False
+
+    def _detect_room_lit(self, gray: np.ndarray) -> Tuple[bool, float]:
+        """Read configured ceiling-light regions, independent of window daylight."""
+        height, width = gray.shape[:2]
+        ratios = []
+        for x1_ratio, y1_ratio, x2_ratio, y2_ratio in self._lighting_state_regions:
+            left = round(width * x1_ratio)
+            top = round(height * y1_ratio)
+            right = round(width * x2_ratio)
+            bottom = round(height * y2_ratio)
+            region = gray[top:bottom, left:right]
+            if region.size:
+                ratios.append(
+                    float(
+                        np.mean(region >= self._lighting_state_pixel_threshold)
+                    )
+                )
+        max_ratio = max(ratios, default=0.0)
+        return max_ratio >= self._lighting_state_min_bright_ratio, max_ratio
+
+    @staticmethod
+    def _validate_normalized_regions(regions) -> List[Tuple[float, float, float, float]]:
+        valid = []
+        for region in regions if isinstance(regions, list) else []:
+            if not isinstance(region, (list, tuple)) or len(region) != 4:
+                continue
+            try:
+                x1, y1, x2, y2 = (float(value) for value in region)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1:
+                valid.append((x1, y1, x2, y2))
+        return valid
 
     # ------------------------------------------------------------------
     # Alert with adaptive backoff
@@ -583,7 +692,7 @@ class MotionDetector:
         log.warning(f"ALERT [{event_type}]: snapshot -> {img_path}")
 
         try:
-            self._on_alert(img_path, event_type)
+            self._on_alert(img_path, event_type, self._room_lit)
         except Exception as exc:
             log.exception(f"on_alert callback failed: {exc}")
 

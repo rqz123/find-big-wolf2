@@ -57,6 +57,15 @@ class TelegramCameraControllerTests(unittest.TestCase):
         response = self.notifier.send_message.call_args.args[0]
         self.assertIn("工作时间", response)
 
+    def test_status_reports_dark_room_low_sensitivity(self) -> None:
+        self.detector.is_room_lit = False
+
+        self.controller.handle("/status")
+
+        response = self.notifier.send_message.call_args.args[0]
+        self.assertIn("感应灯：灭", response)
+        self.assertIn("低移动灵敏度", response)
+
     def test_photo_captures_and_sends_jpeg(self) -> None:
         self.detector.capture_frame.return_value = np.zeros((20, 30, 3), np.uint8)
 
@@ -130,8 +139,11 @@ class TelegramCameraControllerTests(unittest.TestCase):
             max_confidence=0.82,
         )
         self.notifier.send_animation.return_value = True
+        self.detector.is_room_lit = False
 
-        self.controller.send_motion_alert("alert.jpg", "movement")
+        self.controller.send_motion_alert(
+            "alert.jpg", "movement", trigger_room_lit=True
+        )
 
         self.notifier.send_animation.assert_called_once()
         self.notifier.send_message.assert_not_called()
@@ -195,6 +207,29 @@ class TelegramCameraControllerTests(unittest.TestCase):
         self.notifier.send_animation.assert_not_called()
         self.assertEqual(self.person_detector.scan.call_count, 3)
         self.assertIn("未识别到人", self.notifier.send_message.call_args.args[0])
+
+    @patch("core.telegram_controller.cv2.imread")
+    def test_no_person_alert_is_cancelled_when_sensor_light_turns_off(
+        self, imread: Mock
+    ) -> None:
+        frame = np.full((30, 40, 3), 80, np.uint8)
+        imread.return_value = frame
+        self.detector.is_room_lit = False
+        self.detector.recent_frames.return_value = [frame]
+        self.detector.capture_until.return_value = 0
+        self.person_detector.scan.return_value = PersonScan(
+            available=True,
+            found=False,
+            frames=[frame],
+        )
+
+        self.controller.send_motion_alert(
+            "alert.jpg", "movement", trigger_room_lit=True
+        )
+
+        self.notifier.send_message.assert_not_called()
+        self.notifier.send_animation.assert_not_called()
+        self.notifier.send_alert.assert_not_called()
 
     @patch("core.telegram_controller.cv2.imread")
     def test_person_detector_failure_fails_open_with_animation(self, imread: Mock) -> None:

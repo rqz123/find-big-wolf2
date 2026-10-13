@@ -89,7 +89,12 @@ class TelegramCameraController:
             return
         handler()
 
-    def send_motion_alert(self, image_path: str, event_type: str) -> None:
+    def send_motion_alert(
+        self,
+        image_path: str,
+        event_type: str,
+        trigger_room_lit: Optional[bool] = None,
+    ) -> None:
         """Route light changes to text and confirmed people to an evidence GIF."""
         if event_type == "lighting":
             self._notifier.send_message(
@@ -114,6 +119,17 @@ class TelegramCameraController:
             # Without local inference, keep the existing fail-open behaviour and
             # send a short evidence clip for manual review.
             scan.frames.extend(self._capture_post_frames())
+
+        if (
+            not scan.found
+            and trigger_room_lit is True
+            and self._detector.is_room_lit is False
+        ):
+            log.info(
+                "Movement notification cancelled: sensor light switched off "
+                "during tracking and no person was confirmed"
+            )
+            return
 
         if scan.available and not scan.found:
             self._notifier.send_message(
@@ -221,9 +237,17 @@ class TelegramCameraController:
             mode = "自动模式：当前在工作时间外待机"
         else:
             mode = "自动模式：监控中"
+        room_lit = self._detector.is_room_lit
+        if room_lit is True:
+            light_status = "亮（正常移动灵敏度）"
+        elif room_lit is False:
+            light_status = "灭（低移动灵敏度）"
+        else:
+            light_status = "未知"
         self._notifier.send_message(
             "SmartCam 状态\n"
             f"模式：{mode}\n"
+            f"感应灯：{light_status}\n"
             f"摄像头索引：{self._detector.current_device_index}\n"
             f"时间：{self._timestamp()}"
         )

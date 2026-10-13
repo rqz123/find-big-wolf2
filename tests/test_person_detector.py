@@ -11,17 +11,28 @@ from core.person_detector import PersonDetector
 class PersonDetectorConfirmationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.detector = object.__new__(PersonDetector)
-        self.detector._direct_confidence = 0.50
+        self.detector._direct_confidence = 0.70
+        self.detector._upright_confidence = 0.50
+        self.detector._upright_max_aspect_ratio = 1.25
         self.detector._has_face_near = Mock(return_value=False)
         self.frame = np.zeros((20, 30, 3), dtype=np.uint8)
         self.box = (1, 2, 10, 18)
 
     def test_high_confidence_person_does_not_require_face(self) -> None:
+        wide_box = (1, 2, 25, 18)
         confirmed = self.detector._confirm_detections(
-            self.frame, [(self.box, 0.75)]
+            self.frame, [(wide_box, 0.75)]
         )
 
-        self.assertEqual(confirmed, [(self.box, 0.75)])
+        self.assertEqual(confirmed, [(wide_box, 0.75)])
+        self.detector._has_face_near.assert_not_called()
+
+    def test_mid_confidence_upright_person_does_not_require_face(self) -> None:
+        confirmed = self.detector._confirm_detections(
+            self.frame, [(self.box, 0.54)]
+        )
+
+        self.assertEqual(confirmed, [(self.box, 0.54)])
         self.detector._has_face_near.assert_not_called()
 
     def test_low_confidence_person_requires_face(self) -> None:
@@ -33,9 +44,10 @@ class PersonDetectorConfirmationTests(unittest.TestCase):
 
         self.assertEqual(confirmed, [(self.box, 0.35)])
 
-    def test_low_confidence_chair_candidate_is_rejected_without_face(self) -> None:
+    def test_clothed_chair_candidate_at_59_percent_is_rejected_without_face(self) -> None:
+        wide_chair_box = (1, 5, 29, 18)
         confirmed = self.detector._confirm_detections(
-            self.frame, [(self.box, 0.45)]
+            self.frame, [(wide_chair_box, 0.59)]
         )
 
         self.assertEqual(confirmed, [])

@@ -101,11 +101,15 @@ def main() -> None:
         current_device_index=current_dev_idx,
     )
 
-    def on_alert(image_path: str, event_type: str = "movement") -> None:
+    def on_alert(
+        image_path: str,
+        event_type: str = "movement",
+        trigger_room_lit=None,
+    ) -> None:
         log.warning(f"Alert triggered [{event_type}]: {image_path}")
         threading.Thread(
             target=controller.send_motion_alert,
-            args=(image_path, event_type),
+            args=(image_path, event_type, trigger_room_lit),
             daemon=True,
         ).start()
 
