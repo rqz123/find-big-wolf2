@@ -40,7 +40,16 @@ py -3.12 -m venv venv
 .\venv\Scripts\python.exe main.py
 ```
 
-也可以双击 `run.bat`。当 `camera.device_index` 为 `-1` 时，程序会列出可用摄像头并要求选择；选择结果保存在本地 `config.yaml`。
+当 `camera.device_index` 为 `-1` 时，程序会列出可用摄像头并要求选择；选择结果保存在本地 `config.yaml`。
+
+日常启动可双击 `run.bat`：程序以无控制台方式（`pythonw.exe`）在后台运行，只在系统托盘显示图标，脚本窗口随即关闭。日志写入 `logs/smartcam.log`。首次设置（`device_index: -1`）时 `run.bat` 会保留控制台以便选择摄像头。
+
+### 开机自动启动
+
+- 双击 `install_autostart.bat`：在当前用户的「启动」文件夹创建 `SmartCam Watcher` 快捷方式，登录 Windows 后自动后台运行（无需管理员权限）。
+- 双击 `uninstall_autostart.bat`：移除该快捷方式，取消自动启动。
+
+移动项目目录后需要重新运行 `install_autostart.bat`。
 
 ## Telegram 设置
 
@@ -200,7 +209,9 @@ find-big-wolf2/
 ├── config.yaml                 当前公开配置（Git 跟踪）
 ├── telegram_credentials.yaml   私密凭据（Git 忽略）
 ├── requirements.txt
-├── run.bat
+├── run.bat                     后台启动（托盘）
+├── install_autostart.bat       启用开机自动启动
+├── uninstall_autostart.bat     取消开机自动启动
 └── main.py
 ```
 

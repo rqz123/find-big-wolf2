@@ -3,6 +3,7 @@ Logger setup: outputs to stdout and a daily-rotating log file.
 """
 import logging
 import os
+import sys
 from logging.handlers import TimedRotatingFileHandler
 
 _initialized = False
@@ -25,10 +26,12 @@ def setup_logger(level_str: str = "DEBUG", log_dir: str = "logs") -> logging.Log
     logger = logging.getLogger("smartcam")
     logger.setLevel(level)
 
-    ch = logging.StreamHandler()
-    ch.setLevel(level)
-    ch.setFormatter(fmt)
-    logger.addHandler(ch)
+    # pythonw.exe (background launch) has no console: sys.stderr is None.
+    if sys.stderr is not None:
+        ch = logging.StreamHandler()
+        ch.setLevel(level)
+        ch.setFormatter(fmt)
+        logger.addHandler(ch)
 
     log_path = os.path.join(log_dir, "smartcam.log")
     fh = TimedRotatingFileHandler(
