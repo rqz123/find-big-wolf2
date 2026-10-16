@@ -12,6 +12,7 @@ import numpy as np
 from PIL import Image
 
 from core.detector import MotionDetector
+from core.owner_recognizer import OwnerRecognizer
 from core.person_detector import PersonDetector, PersonScan
 from core.scheduler import is_work_time
 from notify.telegram import TelegramNotifier
@@ -25,6 +26,7 @@ _HELP_TEXT = """SmartCam Watcher 命令
 /auto - 启用按时间表自动检测
 /pause - 暂停自动检测（仍可手动取图）
 /status - 查看当前状态
+/me - 录入本人人脸（请正对摄像头）
 /help - 显示本帮助"""
 
 
@@ -38,6 +40,7 @@ class TelegramCameraController:
         notifier: TelegramNotifier,
         on_pause_change: Optional[Callable[[bool], None]] = None,
         person_detector: Optional[PersonDetector] = None,
+        owner_recognizer: Optional[OwnerRecognizer] = None,
     ) -> None:
         self._cfg = cfg
         self._detector = detector
@@ -45,6 +48,9 @@ class TelegramCameraController:
         self._on_pause_change = on_pause_change or (lambda _paused: None)
         self._person_detector = (
             person_detector if person_detector is not None else PersonDetector(cfg)
+        )
+        self._owner_recognizer = (
+            owner_recognizer if owner_recognizer is not None else OwnerRecognizer(cfg)
         )
 
         telegram_cfg = cfg.get("telegram", {})
@@ -68,6 +74,15 @@ class TelegramCameraController:
                 float(detection_cfg.get("person_tracking_duration_sec", 15)),
             ),
         )
+        self._owner_pause_sec = 60.0 * max(
+            1.0, min(480.0, float(detection_cfg.get("owner_pause_minutes", 90)))
+        )
+        self._owner_check_duration_sec = max(
+            0.0, min(15.0, float(detection_cfg.get("owner_check_duration_sec", 4)))
+        )
+        self._owner_pause_notify = bool(
+            detection_cfg.get("owner_pause_notify", False)
+        )
 
     def handle(self, command: str) -> None:
         handlers = {
@@ -82,6 +97,7 @@ class TelegramCameraController:
             "/resume": self._auto,
             "/pause": self._pause,
             "/status": self._status,
+            "/me": self._enroll_owner,
         }
         handler = handlers.get(command)
         if handler is None:
@@ -129,6 +145,17 @@ class TelegramCameraController:
                 "Movement notification cancelled: sensor light switched off "
                 "during tracking and no person was confirmed"
             )
+            return
+
+        if scan.found and self._owner_present(scan):
+            self._detector.owner_pause(self._owner_pause_sec)
+            minutes = self._owner_pause_sec / 60
+            log.info("Owner recognized; alert suppressed, detection paused %.0f min", minutes)
+            if self._owner_pause_notify:
+                self._notifier.send_message(
+                    f"SmartCam：识别到本人，自动检测暂停 {minutes:g} 分钟。\n"
+                    f"{self._timestamp()}"
+                )
             return
 
         if scan.available and not scan.found:
@@ -237,6 +264,10 @@ class TelegramCameraController:
             mode = "自动模式：当前在工作时间外待机"
         else:
             mode = "自动模式：监控中"
+        owner_until = self._detector.owner_paused_until
+        if owner_until is not None and not self._detector.is_user_paused:
+            resume_at = datetime.fromtimestamp(owner_until).strftime("%H:%M")
+            mode = f"识别到本人，暂停至 {resume_at}（/auto 立即恢复）"
         room_lit = self._detector.is_room_lit
         if room_lit is True:
             light_status = "亮（正常移动灵敏度）"
@@ -248,6 +279,7 @@ class TelegramCameraController:
             "SmartCam 状态\n"
             f"模式：{mode}\n"
             f"感应灯：{light_status}\n"
+            f"本人参考照片：{self._owner_recognizer.reference_count} 张\n"
             f"摄像头索引：{self._detector.current_device_index}\n"
             f"时间：{self._timestamp()}"
         )
@@ -271,9 +303,10 @@ class TelegramCameraController:
         found = False
         max_confidence = initial_scan.max_confidence
         best_frame = initial_scan.best_frame
+        person_frame = initial_scan.person_frame
 
         def inspect(frame: np.ndarray) -> bool:
-            nonlocal available, found, max_confidence, best_frame
+            nonlocal available, found, max_confidence, best_frame, person_frame
             frame_scan = self._person_detector.scan([frame])
             evidence_frames.extend(frame_scan.frames)
             if not frame_scan.available:
@@ -284,6 +317,11 @@ class TelegramCameraController:
                 max_confidence = max(max_confidence, frame_scan.max_confidence)
                 if frame_scan.best_frame is not None:
                     best_frame = frame_scan.best_frame
+                person_frame = (
+                    frame_scan.person_frame
+                    if frame_scan.person_frame is not None
+                    else frame
+                )
                 return True
             return False
 
@@ -304,6 +342,42 @@ class TelegramCameraController:
             frames=evidence_frames,
             max_confidence=max_confidence,
             best_frame=best_frame,
+            person_frame=person_frame,
+        )
+
+    def _owner_present(self, scan: PersonScan) -> bool:
+        """Check the confirmed frame, then watch briefly for a frontal face."""
+        if not self._owner_recognizer.available:
+            return False
+        if self._owner_recognizer.is_owner(scan.person_frame):
+            return True
+        if self._owner_check_duration_sec <= 0:
+            return False
+
+        matched = False
+
+        def inspect(frame: np.ndarray) -> bool:
+            nonlocal matched
+            scan.frames.append(frame)
+            matched = self._owner_recognizer.is_owner(frame)
+            return matched
+
+        self._detector.capture_until(
+            self._owner_check_duration_sec, self._clip_fps, inspect
+        )
+        return matched
+
+    def _enroll_owner(self) -> None:
+        frame = self._detector.capture_frame()
+        error = self._owner_recognizer.enroll(frame)
+        if error:
+            self._notifier.send_message(f"录入失败：{error}")
+            return
+        self._notifier.send_message(
+            "已录入本人人脸，参考照片共 "
+            f"{self._owner_recognizer.reference_count} 张。\n"
+            "之后识别到本人时不再提醒，并自动暂停检测 "
+            f"{self._owner_pause_sec / 60:g} 分钟。"
         )
 
     def _send_frames(self, frames: List[np.ndarray], caption: str) -> bool:

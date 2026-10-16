@@ -129,6 +129,8 @@ class MotionDetector:
         self._mode: str = "A"
         self._suspended: bool = False
         self._user_paused: bool = False
+        self._schedule_active: bool = True
+        self._owner_paused_until: float = 0.0
         self._running: bool = False
         self._thread: Optional[threading.Thread] = None
         self._prev_gray: Optional[np.ndarray] = None
@@ -181,39 +183,64 @@ class MotionDetector:
         log.info("MotionDetector stopped")
 
     def suspend(self) -> None:
-        if not self._suspended:
-            self._suspended = True
-            self._mode = "A"
-            self._on_status_change("suspended")
-            log.info("Detector suspended (outside work hours)")
+        """Scheduler: leaving the work-hours window."""
+        self._schedule_active = False
+        self._apply_pause_state("outside work hours")
 
     def resume(self) -> None:
-        if self._user_paused:
-            log.debug("Scheduler resume ignored — user has manually paused")
-            return
-        if self._suspended:
-            self._suspended = False
-            self._on_status_change("active")
-            self._suspend_event.set()
-            log.info("Detector resumed (work hours)")
+        """Scheduler: entering the work-hours window."""
+        self._schedule_active = True
+        self._apply_pause_state("work hours")
 
     def user_pause(self) -> None:
         self._user_paused = True
-        if not self._suspended:
+        self._apply_pause_state("paused by user")
+
+    def user_resume(self, active: bool = True) -> None:
+        """Manual resume also cancels a pending owner pause."""
+        self._user_paused = False
+        self._owner_paused_until = 0.0
+        self._schedule_active = active
+        self._apply_pause_state("resumed by user")
+
+    def owner_pause(self, seconds: float) -> None:
+        """Pause detection while the recognized owner is present."""
+        self._owner_paused_until = time.time() + max(0.0, seconds)
+        self._apply_pause_state(f"owner present, paused for {seconds / 60:.0f} min")
+
+    @property
+    def owner_paused_until(self) -> Optional[float]:
+        """Epoch time when the owner pause ends, or None when not owner-paused."""
+        if self._owner_paused_until > time.time():
+            return self._owner_paused_until
+        return None
+
+    def _check_owner_pause_expiry(self) -> None:
+        if self._owner_paused_until and time.time() >= self._owner_paused_until:
+            self._owner_paused_until = 0.0
+            self._apply_pause_state("owner pause expired")
+
+    def _apply_pause_state(self, reason: str) -> None:
+        should_suspend = (
+            not self._schedule_active
+            or self._user_paused
+            or self.owner_paused_until is not None
+        )
+        if should_suspend and not self._suspended:
             self._suspended = True
             self._mode = "A"
             self._on_status_change("suspended")
-            log.info("Detector paused by user")
-
-    def user_resume(self, active: bool = True) -> None:
-        self._user_paused = False
-        if active and self._suspended:
+            log.info("Detector suspended (%s)", reason)
+        elif not should_suspend and self._suspended:
             self._suspended = False
+            # Baselines from before the pause are stale; rebuild them quietly.
+            self._prev_gray = None
+            self._room_lit = None
             self._on_status_change("active")
             self._suspend_event.set()
-            log.info("Detector resumed by user")
-        elif not active:
-            self.suspend()
+            log.info("Detector resumed (%s)", reason)
+        else:
+            log.debug("Detector pause state unchanged (%s)", reason)
 
     @property
     def is_user_paused(self) -> bool:
@@ -424,6 +451,7 @@ class MotionDetector:
         self._on_status_change("active")
         while not self._stop_event.is_set():
             self._maybe_cleanup_evidence()
+            self._check_owner_pause_expiry()
             if self._suspended and self._preview_update is None:
                 # Suspended outside work hours and no preview open -> wait
                 self._suspend_event.clear()
@@ -663,6 +691,9 @@ class MotionDetector:
     # ------------------------------------------------------------------
 
     def _trigger_alert(self, frame: np.ndarray, event_type: str) -> None:
+        if self._suspended:
+            # Frames still flow while the preview window is open; never alert then.
+            return
         now = time.time()
         state = self._alert_state.setdefault(
             event_type, {"last_time": 0.0, "backoff_index": 0}

@@ -16,6 +16,7 @@ BOT_COMMANDS: List[Dict[str, str]] = [
     {"command": "auto", "description": "启用自动检测"},
     {"command": "pause", "description": "暂停自动检测"},
     {"command": "status", "description": "查看摄像头状态"},
+    {"command": "me", "description": "录入本人人脸"},
     {"command": "help", "description": "显示命令帮助"},
 ]
 

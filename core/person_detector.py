@@ -37,6 +37,8 @@ class PersonScan:
     frames: List[np.ndarray]
     max_confidence: float = 0.0
     best_frame: Optional[np.ndarray] = None
+    # Unannotated copy of the confirmed frame, used for owner face matching.
+    person_frame: Optional[np.ndarray] = None
 
 
 class PersonDetector:
@@ -144,6 +146,7 @@ class PersonDetector:
         found = False
         max_confidence = 0.0
         best_frame = None
+        person_frame = None
         try:
             for frame_index, frame in enumerate(usable):
                 candidates = self._infer_regions(frame)
@@ -166,6 +169,7 @@ class PersonDetector:
                     )
                 if detections and max(item[1] for item in detections) >= max_confidence:
                     best_frame = output.copy()
+                    person_frame = frame
                 annotated.append(output)
                 if found:
                     # One confirmed frame is enough to choose the GIF path.  Keep
@@ -177,7 +181,9 @@ class PersonDetector:
             self._net = None
             return PersonScan(False, False, usable)
 
-        return PersonScan(True, found, annotated, max_confidence, best_frame)
+        return PersonScan(
+            True, found, annotated, max_confidence, best_frame, person_frame
+        )
 
     def _confirm_detections(self, frame: np.ndarray, candidates):
         confirmed = []

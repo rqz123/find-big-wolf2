@@ -195,5 +195,65 @@ class MotionDetectorAlertTests(unittest.TestCase):
             self.assertTrue(log_file.exists())
 
 
+class MotionDetectorPauseTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.on_alert = Mock()
+        self.detector = MotionDetector(
+            cfg={"camera": {"device_index": 0}, "detection": {}},
+            camera_list=[(0, "Test camera")],
+            on_alert=self.on_alert,
+            on_camera_error=Mock(),
+            on_status_change=Mock(),
+        )
+
+    @patch("core.detector.time.time")
+    def test_owner_pause_suspends_then_expires(self, now: Mock) -> None:
+        now.return_value = 1000.0
+        self.detector.owner_pause(600)
+
+        self.assertTrue(self.detector.is_suspended)
+        self.assertEqual(self.detector.owner_paused_until, 1600.0)
+
+        now.return_value = 1601.0
+        self.detector._check_owner_pause_expiry()
+
+        self.assertFalse(self.detector.is_suspended)
+        self.assertIsNone(self.detector.owner_paused_until)
+
+    @patch("core.detector.time.time")
+    def test_owner_pause_expiry_stays_suspended_outside_work_hours(
+        self, now: Mock
+    ) -> None:
+        now.return_value = 1000.0
+        self.detector.owner_pause(600)
+        self.detector.suspend()
+
+        now.return_value = 1601.0
+        self.detector._check_owner_pause_expiry()
+
+        self.assertTrue(self.detector.is_suspended)
+
+    def test_scheduler_resume_does_not_override_owner_pause(self) -> None:
+        self.detector.owner_pause(600)
+        self.detector.resume()
+
+        self.assertTrue(self.detector.is_suspended)
+
+    def test_user_resume_cancels_owner_pause(self) -> None:
+        self.detector.owner_pause(600)
+        self.detector.user_resume(active=True)
+
+        self.assertFalse(self.detector.is_suspended)
+        self.assertIsNone(self.detector.owner_paused_until)
+
+    @patch("core.detector.cv2.imwrite", return_value=True)
+    def test_no_alert_while_suspended(self, _imwrite: Mock) -> None:
+        self.detector.owner_pause(600)
+
+        self.detector._trigger_alert(np.zeros((8, 8, 3), np.uint8), "movement")
+
+        self.on_alert.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

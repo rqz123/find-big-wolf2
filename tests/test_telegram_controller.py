@@ -18,7 +18,12 @@ class TelegramCameraControllerTests(unittest.TestCase):
         self.detector.is_user_paused = False
         self.detector.is_suspended = False
         self.notifier = Mock()
+        self.detector.owner_paused_until = None
         self.person_detector = Mock()
+        self.owner_recognizer = Mock()
+        self.owner_recognizer.available = False
+        self.owner_recognizer.is_owner.return_value = False
+        self.owner_recognizer.reference_count = 3
         self.pause_change = Mock()
         self.controller = TelegramCameraController(
             cfg={
@@ -37,6 +42,7 @@ class TelegramCameraControllerTests(unittest.TestCase):
             notifier=self.notifier,
             on_pause_change=self.pause_change,
             person_detector=self.person_detector,
+            owner_recognizer=self.owner_recognizer,
         )
 
     def test_pause_keeps_manual_capture_available(self) -> None:
@@ -248,6 +254,86 @@ class TelegramCameraControllerTests(unittest.TestCase):
 
         self.notifier.send_animation.assert_called_once()
         self.assertIn("识别暂不可用", self.notifier.send_animation.call_args.args[1])
+
+
+    @patch("core.telegram_controller.cv2.imread")
+    def test_owner_is_silent_and_pauses_detection(self, imread: Mock) -> None:
+        frame = np.full((30, 40, 3), 80, np.uint8)
+        self.owner_recognizer.available = True
+        imread.return_value = frame
+        self.detector.recent_frames.return_value = [frame]
+        self.person_detector.scan.return_value = PersonScan(
+            True, True, [frame], 0.9, frame, frame
+        )
+        self.owner_recognizer.is_owner.return_value = True
+
+        self.controller.send_motion_alert("alert.jpg", "movement")
+
+        self.detector.owner_pause.assert_called_once_with(90 * 60)
+        self.notifier.send_message.assert_not_called()
+        self.notifier.send_animation.assert_not_called()
+        self.notifier.send_alert.assert_not_called()
+
+    @patch("core.telegram_controller.cv2.imread")
+    def test_owner_found_in_follow_up_frames(self, imread: Mock) -> None:
+        frame = np.full((30, 40, 3), 80, np.uint8)
+        self.owner_recognizer.available = True
+        imread.return_value = frame
+        self.detector.recent_frames.return_value = [frame]
+        self.person_detector.scan.return_value = PersonScan(
+            True, True, [frame], 0.9, frame, frame
+        )
+        self.owner_recognizer.is_owner.side_effect = [False, False, True]
+
+        def capture_until(duration: float, _fps: float, stop_when) -> int:
+            self.assertEqual(duration, 4.0)
+            for count in range(1, 6):
+                if stop_when(frame):
+                    return count
+            return 5
+
+        self.detector.capture_until.side_effect = capture_until
+
+        self.controller.send_motion_alert("alert.jpg", "movement")
+
+        self.detector.owner_pause.assert_called_once()
+        self.notifier.send_animation.assert_not_called()
+
+    @patch("core.telegram_controller.cv2.imread")
+    def test_stranger_still_alerts(self, imread: Mock) -> None:
+        frame = np.full((30, 40, 3), 80, np.uint8)
+        self.owner_recognizer.available = True
+        imread.return_value = frame
+        self.detector.recent_frames.return_value = [frame]
+        self.detector.capture_until.return_value = 0
+        self.person_detector.scan.return_value = PersonScan(
+            True, True, [frame, frame], 0.9, frame, frame
+        )
+        self.notifier.send_animation.return_value = True
+
+        self.controller.send_motion_alert("alert.jpg", "movement")
+
+        self.detector.owner_pause.assert_not_called()
+        self.notifier.send_animation.assert_called_once()
+
+    def test_me_enrolls_current_frame(self) -> None:
+        frame = np.zeros((20, 30, 3), np.uint8)
+        self.detector.capture_frame.return_value = frame
+        self.owner_recognizer.enroll.return_value = None
+
+        self.controller.handle("/me")
+
+        self.owner_recognizer.enroll.assert_called_once_with(frame)
+        self.assertIn("已录入", self.notifier.send_message.call_args.args[0])
+
+    def test_status_shows_owner_pause(self) -> None:
+        self.detector.is_suspended = True
+        self.detector.owner_paused_until = 4102444800.0
+
+        self.controller.handle("/status")
+
+        response = self.notifier.send_message.call_args.args[0]
+        self.assertIn("识别到本人", response)
 
 
 if __name__ == "__main__":

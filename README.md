@@ -7,6 +7,7 @@ SmartCam Watcher 是一个运行于 Windows 系统托盘的轻量级摄像头监
 - 双模式检测：常态 2 FPS 与短时高帧率检测自动切换
 - 区分暗到亮、暗化和局部移动，只对暗到亮发开灯提醒
 - OpenCV NanoDet + YuNet 双门槛本地人物识别；画面不上传到识别云服务
+- 本地 SFace 人脸比对识别本人：本人出现时不发提醒，并自动暂停检测 90 分钟
 - 3 秒触发前缓存与 5 秒触发后画面，提高抓到经过人员的概率
 - 自适应告警间隔，减少同一活动造成的重复通知
 - Telegram 动态画面告警、命令取图和远程暂停/恢复
@@ -83,7 +84,8 @@ Bot 只执行 `telegram_credentials.yaml` 中 `chat_id` 对应私人聊天发出
 | `/camera` | 循环切换到下一台摄像头；只有一台时保持不变 |
 | `/pause` | 暂停自动检测，进入命令取图模式；`/photo`、`/clip` 仍可用 |
 | `/auto` | 恢复按 `schedule` 时间表自动检测 |
-| `/status` | 查看自动/暂停状态、感应灯及灵敏度、摄像头索引和电脑本地时间 |
+| `/status` | 查看自动/暂停状态（含本人暂停截止时间）、感应灯及灵敏度、本人参考照片数、摄像头索引和电脑本地时间 |
+| `/me` | 本人正对摄像头时发送，录入一张参考照片，提高本人识别率 |
 | `/help` | 显示命令列表 |
 
 动态画面在电脑端由连续 JPEG 帧生成 GIF，再通过 Telegram [`sendAnimation`](https://core.telegram.org/bots/api#sendanimation) 发送。这样比直接上传 MJPEG/AVI 更容易在 Telegram 手机端自动播放；Telegram 可能在云端将 GIF 转换为无声 MPEG-4 动画。
@@ -120,6 +122,13 @@ Bot 只执行 `telegram_credentials.yaml` 中 `chat_id` 对应私人聊天发出
 | `detection.person_upright_max_aspect_ratio` | `1.25` | 中置信度框允许的最大宽高比，用于排除横宽的披衣椅子 |
 | `detection.face_model_path` | `models/face_detection_yunet_2023mar.onnx` | 低置信度候选的人脸确认模型 |
 | `detection.face_confidence_threshold` | `0.60` | 人脸确认门槛 |
+| `detection.owner_recognition_enabled` | `true` | 是否启用本人识别 |
+| `detection.owner_faces_dir` | `owner_faces` | 本人参考照片目录（Git 忽略） |
+| `detection.owner_model_path` | `models/face_recognition_sface_2021dec.onnx` | 本地 SFace 人脸比对模型 |
+| `detection.owner_match_threshold` | `0.45` | 与参考照片的余弦相似度门槛；越高越严格 |
+| `detection.owner_check_duration_sec` | `4` | 确认有人但未看到本人正脸时，额外等待正脸的秒数 |
+| `detection.owner_pause_minutes` | `90` | 识别到本人后暂停自动检测的分钟数 |
+| `detection.owner_pause_notify` | `false` | 为 `true` 时暂停前发送一条简短说明 |
 | `detection.person_detection_regions` | 见配置文件 | 全图及重点区域，坐标为归一化 `x1,y1,x2,y2` |
 | `detection.person_nms_threshold` | `0.3` | 重叠人物框合并阈值，避免同一人出现多个框 |
 | `detection.backoff_intervals_sec` | `[300,900,1800,3600]` | 连续告警的递增抑制间隔 |
@@ -142,11 +151,12 @@ Bot 只执行 `telegram_credentials.yaml` 中 `chat_id` 对应私人聊天发出
 4. 感应灯亮时使用正常移动门槛；灯灭时像素差门槛提高 2 倍、轮廓面积门槛提高 4 倍，过滤暗环境中的小阴影和曝光变化，但保留大轮廓检测。
 5. 移动事件先检查触发前缓存和触发帧；若尚未看到人，摄像头最多继续跟踪 15 秒，以 2 FPS 在本机用 NanoDet 扫描全图和重点区域。70% 以上直接确认；50%–70% 只有竖直人物框可直接确认，横宽候选需要人脸；更低候选也必须通过 YuNet 人脸确认。
 6. 跟踪期间一旦确认有人便停止等待，人物框以绿色标出并发送 GIF，同时把最佳人物帧保存为 `logs/person_*.jpg`；完整窗口内仍未识别到人时只发文字。若告警开始时灯亮、跟踪期间灯已熄灭且始终无人，则取消这条待发送通知。
-7. 若人物模型缺失或推理失败，系统采用安全优先策略发送 GIF，避免因识别故障漏掉真实人员。
-8. 光线和移动分别计算自适应告警间隔，因此开灯文字不会压制紧随其后的人物动态画面。
-9. 所有触发帧仍保存为 `logs/alert_YYYYMMDD_HHMMSS.jpg`；`alert_*.jpg` 和 `person_*.jpg` 超过 7 天后自动清除，黑帧不会进入检测和告警。
-10. 命令监听线程通过 `getUpdates` 长轮询接收手机命令，只接受配置的私人 `chat_id`。
-11. 网络超时、Telegram 限流或服务端错误会指数退避重试；配置或鉴权错误直接记录日志。
+7. 确认有人后，用 YuNet + SFace 将画面中的人脸与 `owner_faces/` 中的本人参考照片比对；未看到正脸时再观察最多 4 秒。识别为本人则不发送任何消息，并暂停自动检测 90 分钟（含开灯提醒）；到期自动恢复，本人仍在则再次静默暂停。侧脸、背影或识别模型不可用时按陌生人正常告警。`/auto` 可立即结束暂停。
+8. 若人物模型缺失或推理失败，系统采用安全优先策略发送 GIF，避免因识别故障漏掉真实人员。
+9. 光线和移动分别计算自适应告警间隔，因此开灯文字不会压制紧随其后的人物动态画面。
+10. 所有触发帧仍保存为 `logs/alert_YYYYMMDD_HHMMSS.jpg`；`alert_*.jpg` 和 `person_*.jpg` 超过 7 天后自动清除，黑帧不会进入检测和告警。
+11. 命令监听线程通过 `getUpdates` 长轮询接收手机命令，只接受配置的私人 `chat_id`。
+12. 网络超时、Telegram 限流或服务端错误会指数退避重试；配置或鉴权错误直接记录日志。
 
 ## 系统托盘
 
@@ -198,7 +208,8 @@ Bot 只执行 `telegram_credentials.yaml` 中 `chat_id` 对应私人聊天发出
 ```text
 find-big-wolf2/
 ├── core/                       摄像头、检测器、动态画面和命令控制
-├── models/                     本地 NanoDet 人物模型及第三方许可证
+├── models/                     本地 NanoDet / YuNet / SFace 模型及第三方许可证
+├── owner_faces/                本人参考照片（Git 忽略）
 ├── notify/telegram.py          Telegram Bot API 消息与媒体发送
 ├── notify/telegram_commands.py Telegram 命令长轮询和访问控制
 ├── ui/                         系统托盘和调试预览

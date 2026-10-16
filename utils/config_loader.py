@@ -41,6 +41,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "person_upright_max_aspect_ratio": 1.25,
         "face_model_path": "models/face_detection_yunet_2023mar.onnx",
         "face_confidence_threshold": 0.60,
+        "owner_recognition_enabled": True,
+        "owner_faces_dir": "owner_faces",
+        "owner_model_path": "models/face_recognition_sface_2021dec.onnx",
+        "owner_match_threshold": 0.45,
+        "owner_check_duration_sec": 4,
+        "owner_pause_minutes": 90,
+        "owner_pause_notify": False,
         "person_detection_regions": [
             [0.0, 0.0, 1.0, 1.0],
             [0.25, 0.10, 0.80, 1.0],
