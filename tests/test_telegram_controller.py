@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -316,15 +319,76 @@ class TelegramCameraControllerTests(unittest.TestCase):
         self.detector.owner_pause.assert_not_called()
         self.notifier.send_animation.assert_called_once()
 
-    def test_me_enrolls_current_frame(self) -> None:
-        frame = np.zeros((20, 30, 3), np.uint8)
-        self.detector.capture_frame.return_value = frame
+    def _run_me_with_evidence(self, minutes_ago: float) -> str:
+        stamp = (datetime.now() - timedelta(minutes=minutes_ago)).strftime(
+            "%Y%m%d_%H%M%S"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_dir = Path(temp_dir)
+            cv2.imwrite(
+                str(log_dir / f"person_{stamp}.jpg"),
+                np.full((20, 30, 3), 90, np.uint8),
+            )
+            with patch("core.telegram_controller._LOG_DIR", log_dir):
+                self.controller.handle("/me")
+        return stamp
+
+    def test_me_pauses_from_alert_time_and_saves_face(self) -> None:
         self.owner_recognizer.enroll.return_value = None
 
-        self.controller.handle("/me")
+        stamp = self._run_me_with_evidence(minutes_ago=10)
 
-        self.owner_recognizer.enroll.assert_called_once_with(frame)
-        self.assertIn("已录入", self.notifier.send_message.call_args.args[0])
+        frames, name = self.owner_recognizer.enroll.call_args.args
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(name, f"owner_{stamp}.jpg")
+        remaining = self.detector.owner_pause.call_args.args[0]
+        self.assertAlmostEqual(remaining, 80 * 60, delta=5)
+        response = self.notifier.send_message.call_args.args[0]
+        self.assertIn("人脸已保存", response)
+        self.assertIn("静默至", response)
+
+    def test_me_on_old_alert_saves_face_without_pausing(self) -> None:
+        self.owner_recognizer.enroll.return_value = None
+
+        self._run_me_with_evidence(minutes_ago=120)
+
+        self.owner_recognizer.enroll.assert_called_once()
+        self.detector.owner_pause.assert_not_called()
+        self.assertIn("不再静默", self.notifier.send_message.call_args.args[0])
+
+    def test_me_still_pauses_when_no_face_found(self) -> None:
+        self.owner_recognizer.enroll.return_value = "截图中没有找到唯一一张清晰人脸。"
+
+        self._run_me_with_evidence(minutes_ago=1)
+
+        self.detector.owner_pause.assert_called_once()
+        self.assertIn("人脸未保存", self.notifier.send_message.call_args.args[0])
+
+    def test_me_without_any_alert(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch("core.telegram_controller._LOG_DIR", Path(temp_dir)):
+                self.controller.handle("/me")
+
+        self.owner_recognizer.enroll.assert_not_called()
+        self.detector.owner_pause.assert_not_called()
+        self.assertIn("没有找到", self.notifier.send_message.call_args.args[0])
+
+    def test_me_prefers_raw_frames_from_latest_alert(self) -> None:
+        raw = np.full((20, 30, 3), 50, np.uint8)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.owner_recognizer.enroll.return_value = None
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_dir = Path(temp_dir)
+            self.controller._last_person_alert = (
+                str(log_dir / f"alert_{stamp}.jpg"),
+                [raw],
+            )
+            with patch("core.telegram_controller._LOG_DIR", log_dir):
+                self.controller.handle("/me")
+
+        frames, _name = self.owner_recognizer.enroll.call_args.args
+        self.assertIs(frames[0], raw)
+        self.detector.owner_pause.assert_called_once()
 
     def test_status_shows_owner_pause(self) -> None:
         self.detector.is_suspended = True

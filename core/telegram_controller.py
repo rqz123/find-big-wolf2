@@ -5,7 +5,7 @@ import logging
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -19,6 +19,9 @@ from notify.telegram import TelegramNotifier
 
 log = logging.getLogger("smartcam.telegram.controller")
 
+_LOG_DIR = Path(__file__).resolve().parents[1] / "logs"
+_EVIDENCE_TIME_FORMAT = "%Y%m%d_%H%M%S"
+
 _HELP_TEXT = """SmartCam Watcher 命令
 /photo - 立即拍摄一张照片
 /clip - 拍摄几秒低帧率动态画面
@@ -26,7 +29,7 @@ _HELP_TEXT = """SmartCam Watcher 命令
 /auto - 启用按时间表自动检测
 /pause - 暂停自动检测（仍可手动取图）
 /status - 查看当前状态
-/me - 录入本人人脸（请正对摄像头）
+/me - 最近一次人物告警是我：按告警时间静默并保存人脸
 /help - 显示本帮助"""
 
 
@@ -83,6 +86,8 @@ class TelegramCameraController:
         self._owner_pause_notify = bool(
             detection_cfg.get("owner_pause_notify", False)
         )
+        # (alert image path, unannotated candidate frames) of the latest person alert.
+        self._last_person_alert: Optional[Tuple[str, List[np.ndarray]]] = None
 
     def handle(self, command: str) -> None:
         handlers = {
@@ -166,6 +171,10 @@ class TelegramCameraController:
             )
             return
 
+        self._last_person_alert = (
+            image_path,
+            [frame for frame in [scan.person_frame, *frames] if frame is not None],
+        )
         fallback_path = image_path
         if scan.available:
             if scan.best_frame is not None:
@@ -178,7 +187,8 @@ class TelegramCameraController:
                     fallback_path = str(evidence_path)
             caption = (
                 f"SmartCam：检测到人（最高置信度 {scan.max_confidence:.0%}）\n"
-                f"{self._timestamp()}"
+                f"{self._timestamp()}\n"
+                "如果是你本人，发送 /me"
             )
         else:
             caption = (
@@ -368,17 +378,76 @@ class TelegramCameraController:
         return matched
 
     def _enroll_owner(self) -> None:
-        frame = self._detector.capture_frame()
-        error = self._owner_recognizer.enroll(frame)
-        if error:
-            self._notifier.send_message(f"录入失败：{error}")
+        """Mark the latest person alert as the owner: pause from its time and enroll."""
+        evidence = self._last_person_evidence()
+        if evidence is None:
+            self._notifier.send_message("没有找到最近的人物告警截图。")
             return
-        self._notifier.send_message(
-            "已录入本人人脸，参考照片共 "
-            f"{self._owner_recognizer.reference_count} 张。\n"
-            "之后识别到本人时不再提醒，并自动暂停检测 "
-            f"{self._owner_pause_sec / 60:g} 分钟。"
+        alert_time, frames = evidence
+
+        lines = [f"已确认 {alert_time:%m-%d %H:%M:%S} 的告警是你本人。"]
+        error = self._owner_recognizer.enroll(
+            frames, f"owner_{alert_time.strftime(_EVIDENCE_TIME_FORMAT)}.jpg"
         )
+        if error:
+            lines.append(f"人脸未保存：{error}")
+        else:
+            lines.append(
+                "人脸已保存为参考照片，共 "
+                f"{self._owner_recognizer.reference_count} 张。"
+            )
+
+        remaining = alert_time.timestamp() + self._owner_pause_sec - datetime.now().timestamp()
+        if remaining > 0:
+            self._detector.owner_pause(remaining)
+            resume_at = datetime.fromtimestamp(alert_time.timestamp() + self._owner_pause_sec)
+            lines.append(f"自动检测静默至 {resume_at:%H:%M}（/auto 立即恢复）。")
+        else:
+            lines.append(
+                f"该告警已超过 {self._owner_pause_sec / 60:g} 分钟，不再静默。"
+            )
+        log.info("Owner confirmed alert at %s via /me", alert_time)
+        self._notifier.send_message("\n".join(lines))
+
+    def _last_person_evidence(self) -> Optional[Tuple[datetime, List[np.ndarray]]]:
+        """Frames and time of the newest person alert, from memory or logs/.
+
+        In-memory frames are lost on restart, so the newest saved
+        ``person_*.jpg`` is used when it is at least as recent.
+        """
+        candidates = []
+        if self._last_person_alert is not None:
+            path, frames = self._last_person_alert
+            candidates.append((self._evidence_time(Path(path)), list(frames)))
+        newest = max(_LOG_DIR.glob("person_*.jpg"), default=None)
+        if newest is not None:
+            candidates.append((self._evidence_time(newest), []))
+        candidates = [item for item in candidates if item[0] is not None]
+        if not candidates:
+            return None
+        # max() keeps the first of equal times, preferring the in-memory frames.
+        alert_time, frames = max(candidates, key=lambda item: item[0])
+
+        stamp = alert_time.strftime(_EVIDENCE_TIME_FORMAT)
+        for prefix in ("person_", "alert_"):
+            path = _LOG_DIR / f"{prefix}{stamp}.jpg"
+            image = cv2.imread(str(path)) if path.is_file() else None
+            if image is not None:
+                frames.append(image)
+        if not frames:
+            return None
+        return alert_time, frames
+
+    @staticmethod
+    def _evidence_time(path: Path) -> Optional[datetime]:
+        """Parse the time from alert_/person_YYYYMMDD_HHMMSS.jpg."""
+        parts = path.stem.split("_", 1)
+        if len(parts) != 2:
+            return None
+        try:
+            return datetime.strptime(parts[1], _EVIDENCE_TIME_FORMAT)
+        except ValueError:
+            return None
 
     def _send_frames(self, frames: List[np.ndarray], caption: str) -> bool:
         with tempfile.TemporaryDirectory(prefix="smartcam-clip-") as temp_dir:

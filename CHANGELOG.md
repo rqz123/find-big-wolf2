@@ -10,7 +10,7 @@
 - 手动暂停/恢复监控
 - Telegram `/photo`、`/clip`、`/auto`、`/pause`、`/status` 和 `/help` 远程命令
 - Telegram `/camera` 循环摄像头切换命令
-- 本地 SFace 本人识别：本人出现时不发提醒并暂停检测 90 分钟；`/me` 录入参考照片，`/status` 显示暂停截止时间
+- 本地 SFace 本人识别：本人出现时不发提醒并暂停检测 90 分钟；`/me` 确认最近一次人物告警是本人，按告警时间静默并保存人脸；`/status` 显示暂停截止时间
 - Telegram Bot 与摄像头安全指南
 - 仅允许配置的私人 Chat ID 控制摄像头
 - 完整 README、Telegram 设置指南和 PRD v1.2

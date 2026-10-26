@@ -10,14 +10,14 @@ from notify.telegram import TelegramNotifier
 log = logging.getLogger("smartcam.telegram.commands")
 
 BOT_COMMANDS: List[Dict[str, str]] = [
-    {"command": "photo", "description": "立即拍摄一张照片"},
-    {"command": "clip", "description": "拍摄几秒低帧率动态画面"},
-    {"command": "camera", "description": "循环切换到下一台摄像头"},
-    {"command": "auto", "description": "启用自动检测"},
-    {"command": "pause", "description": "暂停自动检测"},
-    {"command": "status", "description": "查看摄像头状态"},
-    {"command": "me", "description": "录入本人人脸"},
-    {"command": "help", "description": "显示命令帮助"},
+    {"command": "photo", "description": "Take a photo now"},
+    {"command": "clip", "description": "Record a short clip"},
+    {"command": "camera", "description": "Switch to the next camera"},
+    {"command": "auto", "description": "Resume automatic detection"},
+    {"command": "pause", "description": "Pause automatic detection"},
+    {"command": "status", "description": "Show current status"},
+    {"command": "me", "description": "Last alert was me: mute and save my face"},
+    {"command": "help", "description": "Show command help"},
 ]
 
 

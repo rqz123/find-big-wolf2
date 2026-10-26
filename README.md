@@ -85,7 +85,7 @@ Bot 只执行 `telegram_credentials.yaml` 中 `chat_id` 对应私人聊天发出
 | `/pause` | 暂停自动检测，进入命令取图模式；`/photo`、`/clip` 仍可用 |
 | `/auto` | 恢复按 `schedule` 时间表自动检测 |
 | `/status` | 查看自动/暂停状态（含本人暂停截止时间）、感应灯及灵敏度、本人参考照片数、摄像头索引和电脑本地时间 |
-| `/me` | 本人正对摄像头时发送，录入一张参考照片，提高本人识别率 |
+| `/me` | 确认最近一次人物告警是你本人：从该告警时间起静默 90 分钟（已过期则不静默），并把截图中的人脸保存为参考照片，提高之后的识别率 |
 | `/help` | 显示命令列表 |
 
 动态画面在电脑端由连续 JPEG 帧生成 GIF，再通过 Telegram [`sendAnimation`](https://core.telegram.org/bots/api#sendanimation) 发送。这样比直接上传 MJPEG/AVI 更容易在 Telegram 手机端自动播放；Telegram 可能在云端将 GIF 转换为无声 MPEG-4 动画。

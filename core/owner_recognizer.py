@@ -11,7 +11,7 @@ import logging
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -106,19 +106,33 @@ class OwnerRecognizer:
             log.debug("Owner face similarity %.3f (threshold %.2f)", score, self._threshold)
         return score >= self._threshold
 
-    def enroll(self, frame: Optional[np.ndarray]) -> Optional[str]:
-        """Save the frame as a reference photo; return an error message or None."""
+    def enroll(
+        self, frames: Sequence[Optional[np.ndarray]], name: Optional[str] = None
+    ) -> Optional[str]:
+        """Save the frame with the largest single face as a reference photo.
+
+        Frames showing several faces are skipped so another person is never
+        enrolled by mistake.  Returns an error message, or None on success.
+        """
         if self._recognizer is None:
             return "人脸识别模型不可用。"
-        if frame is None or not frame.size:
-            return "摄像头当前不可用。"
         with self._lock:
-            faces = self._detect_faces(frame)
-            if len(faces) != 1:
-                return f"需要画面中恰好一张清晰正脸，当前检测到 {len(faces)} 张。"
-            feature = self._feature(frame, faces[0])
+            best = None
+            for frame in frames:
+                if frame is None or not frame.size:
+                    continue
+                faces = self._detect_faces(frame)
+                if len(faces) != 1:
+                    continue
+                area = float(faces[0][2] * faces[0][3])
+                if best is None or area > best[0]:
+                    best = (area, frame, faces[0])
+            if best is None:
+                return "截图中没有找到唯一一张清晰人脸。"
+            _area, frame, face = best
+            feature = self._feature(frame, face)
             self._faces_dir.mkdir(parents=True, exist_ok=True)
-            name = datetime.now().strftime("owner_%Y%m%d_%H%M%S.jpg")
+            name = name or datetime.now().strftime("owner_%Y%m%d_%H%M%S.jpg")
             if not cv2.imwrite(str(self._faces_dir / name), frame):
                 return "无法保存参考照片。"
             self._gallery.append(feature)
