@@ -58,5 +58,26 @@ class TelegramCommandListenerTests(unittest.TestCase):
         )
 
 
+    def test_on_ready_runs_once_when_telegram_is_reachable(self) -> None:
+        on_ready = Mock()
+        listener = TelegramCommandListener(
+            self.notifier, self.handler, on_ready=on_ready
+        )
+        self.notifier.is_configured = True
+        polls = []
+
+        def get_updates(offset=None, timeout_sec=0):
+            polls.append(timeout_sec)
+            if len(polls) >= 3:
+                listener._stop_event.set()
+            return []
+
+        self.notifier.get_updates.side_effect = get_updates
+
+        listener._loop()
+
+        on_ready.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -29,9 +29,13 @@ class TelegramCommandListener:
         notifier: TelegramNotifier,
         on_command: Callable[[str], None],
         poll_timeout_sec: int = 20,
+        on_ready: Optional[Callable[[], None]] = None,
     ) -> None:
         self._notifier = notifier
         self._on_command = on_command
+        # Called once, the first time Telegram is reachable after start-up.
+        self._on_ready = on_ready
+        self._ready_notified = False
         self._poll_timeout_sec = max(1, min(50, int(poll_timeout_sec)))
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -74,6 +78,12 @@ class TelegramCommandListener:
                 self._notifier.set_commands(BOT_COMMANDS)
                 initialized = True
                 log.info("Telegram command listener ready")
+                if self._on_ready is not None and not self._ready_notified:
+                    self._ready_notified = True
+                    try:
+                        self._on_ready()
+                    except Exception as exc:
+                        log.exception("Start-up notice failed: %s", type(exc).__name__)
 
             updates = self._notifier.get_updates(
                 offset=self._offset,
@@ -119,6 +129,7 @@ class TelegramCommandListener:
         if not command.startswith("/"):
             command = "/help"
 
+        log.info("Telegram command received: %s", command)
         try:
             self._on_command(command)
         except Exception as exc:

@@ -342,7 +342,27 @@ class MotionDetector:
             return False
         return float(frame.mean()) > 2.0 or float(frame.std()) > 2.0
 
+    def _release_camera_while_paused(self) -> None:
+        """Close the camera unless an on-demand capture is using it."""
+        if not self._camera.is_open:
+            return
+        if not self._command_capture_lock.acquire(blocking=False):
+            return
+        try:
+            self._camera.close()
+            self._prev_gray = None
+            log.info("Camera released while detection is paused")
+        finally:
+            self._command_capture_lock.release()
+
     def _capture_warmed_frame(self) -> Optional[np.ndarray]:
+        if not self._camera.is_open:
+            # Paused detection releases the camera; open it for this command.
+            if not self._camera.open():
+                return None
+            frame = self._read_warmup_sequence(_COMMAND_REOPEN_WARMUP_FRAMES)
+            if frame is not None:
+                return frame
         frame = self._read_warmup_sequence(_COMMAND_WARMUP_FRAMES)
         if frame is not None:
             return frame
@@ -453,10 +473,18 @@ class MotionDetector:
             self._maybe_cleanup_evidence()
             self._check_owner_pause_expiry()
             if self._suspended and self._preview_update is None:
-                # Suspended outside work hours and no preview open -> wait
+                # Paused and no preview open: release the camera (and its
+                # indicator light) until monitoring resumes.
+                self._release_camera_while_paused()
                 self._suspend_event.clear()
                 self._suspend_event.wait(timeout=1.0)
                 continue
+
+            if not self._camera.is_open:
+                if not self._camera.open():
+                    self._interruptible_sleep(5.0)
+                    continue
+                self._prev_gray = None
 
             frame = self._camera.read_frame()
             if frame is None:

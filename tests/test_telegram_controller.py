@@ -390,6 +390,15 @@ class TelegramCameraControllerTests(unittest.TestCase):
         self.assertIs(frames[0], raw)
         self.detector.owner_pause.assert_called_once()
 
+    def test_startup_notice_reports_state(self) -> None:
+        self.detector.is_room_lit = True
+
+        self.controller.send_startup_notice()
+
+        response = self.notifier.send_message.call_args.args[0]
+        self.assertIn("服务已启动", response)
+        self.assertIn("模式：", response)
+
     def test_status_shows_owner_pause(self) -> None:
         self.detector.is_suspended = True
         self.detector.owner_paused_until = 4102444800.0

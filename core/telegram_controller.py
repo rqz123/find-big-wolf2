@@ -267,7 +267,15 @@ class TelegramCameraController:
             "自动检测已暂停。你仍可使用 /photo 或 /clip 手动取图。"
         )
 
+    def send_startup_notice(self) -> None:
+        """Tell the phone the service (re)started, with its current state."""
+        if self._notifier.send_message(self._status_text("SmartCam 服务已启动")):
+            log.info("Start-up notice sent to Telegram")
+
     def _status(self) -> None:
+        self._notifier.send_message(self._status_text("SmartCam 状态"))
+
+    def _status_text(self, title: str) -> str:
         if self._detector.is_user_paused:
             mode = "已手动暂停（命令取图可用）"
         elif self._detector.is_suspended:
@@ -285,8 +293,8 @@ class TelegramCameraController:
             light_status = "灭（低移动灵敏度）"
         else:
             light_status = "未知"
-        self._notifier.send_message(
-            "SmartCam 状态\n"
+        return (
+            f"{title}\n"
             f"模式：{mode}\n"
             f"感应灯：{light_status}\n"
             f"本人参考照片：{self._owner_recognizer.reference_count} 张\n"

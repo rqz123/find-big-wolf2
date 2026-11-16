@@ -254,6 +254,36 @@ class MotionDetectorPauseTests(unittest.TestCase):
 
         self.on_alert.assert_not_called()
 
+    def test_paused_detector_releases_camera(self) -> None:
+        camera = Mock(is_open=True)
+        self.detector._camera = camera
+
+        self.detector._release_camera_while_paused()
+
+        camera.close.assert_called_once()
+
+    def test_camera_kept_while_command_capture_runs(self) -> None:
+        camera = Mock(is_open=True)
+        self.detector._camera = camera
+
+        with self.detector._command_capture_lock:
+            self.detector._release_camera_while_paused()
+
+        camera.close.assert_not_called()
+
+    @patch("core.detector.time.sleep")
+    def test_command_capture_opens_released_camera(self, _sleep: Mock) -> None:
+        frame = np.full((8, 8, 3), 80, np.uint8)
+        camera = Mock(is_open=False)
+        camera.open.return_value = True
+        camera.read_frame.return_value = frame
+        self.detector._camera = camera
+
+        captured = self.detector.capture_frame()
+
+        camera.open.assert_called_once()
+        self.assertIsNotNone(captured)
+
 
 if __name__ == "__main__":
     unittest.main()

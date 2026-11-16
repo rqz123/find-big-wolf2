@@ -144,6 +144,7 @@ def main() -> None:
         notifier=notifier,
         on_command=controller.handle,
         poll_timeout_sec=cfg.get("telegram", {}).get("command_poll_timeout_sec", 20),
+        on_ready=controller.send_startup_notice,
     )
 
     tray.set_detector(detector)
